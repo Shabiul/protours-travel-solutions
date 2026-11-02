@@ -82,13 +82,14 @@ export default function Crm() {
               <h1 className="font-display text-[1.6rem] font-bold text-ink">Back office</h1>
               <p className="text-[0.85rem] text-slate-500">{session.email}</p>
             </div>
-            <nav aria-label="CRM sections" className="mb-6 flex gap-1 overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm">
+            <div className="lg:grid lg:grid-cols-[15rem_minmax(0,1fr)] lg:items-start lg:gap-6">
+            <nav aria-label="CRM sections" className="mb-6 flex gap-1 overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm lg:sticky lg:top-28 lg:mb-0 lg:flex-col lg:overflow-visible lg:p-2">
               {TABS.map(([id, label, Icon]) => (
                 <button key={id} onClick={() => setTab(id)} aria-current={tab === id ? 'page' : undefined}
-                  className={`flex shrink-0 items-center gap-2 rounded-xl px-4 py-2.5 text-[0.92rem] font-bold ${tab === id ? 'bg-navy-950 text-white' : 'text-slate-700 hover:bg-sand'}`}><Icon size={17} /> {label}{alerts[id] > 0 && <span className="ml-1 rounded-full bg-red-600 px-1.5 py-0.5 text-[0.7rem] leading-none text-white" aria-label={`${alerts[id]} need attention`}>{alerts[id]}</span>}</button>
+                  className={`flex shrink-0 items-center gap-2 rounded-xl px-4 py-2.5 text-left text-[0.92rem] font-bold lg:w-full ${tab === id ? 'bg-navy-950 text-white' : 'text-slate-700 hover:bg-sand'}`}><Icon size={17} /> {label}{alerts[id] > 0 && <span className="ml-1 rounded-full bg-red-600 lg:ml-auto px-1.5 py-0.5 text-[0.7rem] leading-none text-white" aria-label={`${alerts[id]} need attention`}>{alerts[id]}</span>}</button>
               ))}
             </nav>
-            <Suspense fallback={<Loader2 className="mx-auto mt-10 animate-spin" />}>
+            <div className="min-w-0"><Suspense fallback={<Loader2 className="mx-auto mt-10 animate-spin" />}>
               {tab === 'dashboard' && <Dashboard go={setTab} onOpenBooking={goBooking} onOpenEnquiry={goEnquiry} onFollowUps={(due) => { setEnquiry(null); setTab('enquiries'); window.__crmDue = due }} />}
               {tab === 'bookings' && <Bookings openId={booking} onOpen={setBooking} admin={role === 'admin'} />}
               {tab === 'cases' && <Cases openId={orderId} onOpen={setOrderId} seedFromEnquiry={seed} onSeedUsed={() => setSeed(null)} />}
@@ -98,7 +99,8 @@ export default function Crm() {
               {tab === 'enquiries' && <Enquiries openId={enquiry} onOpen={setEnquiry} onMakeOrder={(s) => { setEnquiry(null); setSeed(s); setTab('cases') }} />}
               {tab === 'logs' && <Logs onOpenBooking={goBooking} />}
               {tab === 'settings' && <Settings admin={role === 'admin'} role={role} />}
-            </Suspense>
+            </Suspense></div>
+            </div>
           </>
         )}
       </div>
