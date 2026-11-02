@@ -12,7 +12,11 @@ const save = (s) => {
   listeners.forEach((f) => f(s))
 }
 export const onSession = (f) => { listeners.add(f); return () => listeners.delete(f) }
-export const signOut = () => save(null)
+export const signOut = () => { rolePromise = null; save(null) }
+
+/** 'admin' or 'staff'. Staff do not see the money / settings buttons (the server refuses those actions for them anyway). */
+let rolePromise = null
+export const loadRole = () => (rolePromise ||= crm('me').then((r) => r.role).catch(() => { rolePromise = null; return 'staff' }))
 
 const post = async (body, token) => {
   const r = await fetch('/api/crm', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) })
@@ -24,6 +28,7 @@ const post = async (body, token) => {
 const store = (d) => save({ accessToken: d.accessToken, refreshToken: d.refreshToken, expiresAt: Date.now() + (d.expiresIn - 60) * 1000, email: d.email })
 
 export async function signIn(email, password) {
+  rolePromise = null
   store(await post({ action: 'login', email, password }))
 }
 

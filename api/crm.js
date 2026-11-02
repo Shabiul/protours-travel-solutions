@@ -4,6 +4,8 @@ import { PayError, refundPayment, razorpayConfigured } from './_lib/pay.js'
 import { bookingForRefund, recordRefund } from './_lib/store.js'
 import { getMarkup, saveMarkup, LIMITS } from './_lib/markup.js'
 
+const ADMIN_ONLY = new Set(['refund', 'markupSave', 'purge', 'businessSave', 'invoiceCancel', 'export'])
+
 /**
  * Back office (CRM) API: flight bookings, website enquiries, the TBO call logs and the TBO wallet.
  * One endpoint: GET /api/crm?action=...  or  POST /api/crm {action, ...}.
@@ -19,6 +21,22 @@ const BOOKING_STATUS = ['payment_pending', 'paid', 'ticketed', 'needs_attention'
 const ENQUIRY_STATUS = ['new', 'contacted', 'quoted', 'won', 'lost']
 // every service the business handles (the website's services plus corporate travel and insurance); flights bookings are tracked as bookings
 const SERVICES = ['flights', 'hotels', 'tailor', 'tours', 'visa', 'passport', 'umrah', 'corporate', 'insurance', 'other']
+const CASE_STATUS = ['docs_pending', 'docs_received', 'in_progress', 'submitted', 'approved', 'delivered', 'rejected', 'cancelled']
+const PAY_MODES = ['cash', 'upi', 'bank', 'card', 'cheque', 'other']
+const GST_RATES = [0, 5, 12, 18, 28]
+// Document / task checklists copied into a new order, per service. Staff can edit the list on each order.
+const CHECKLISTS = {
+  visa: ['Passport copy (valid 6+ months)', 'Passport-size photographs', 'Bank statements (last 6 months)', 'Salary slips / ITR / business proof', 'Employment or business letter', 'Travel itinerary', 'Hotel booking', 'Application form signed', 'Fees paid', 'Application submitted / appointment booked'],
+  passport: ['Aadhaar copy', 'Proof of address', 'Proof of date of birth', 'Photographs', 'Old passport (for renewal)', 'Application filed on Passport Seva', 'Appointment booked', 'Fees paid'],
+  umrah: ['Passport copy (valid 6+ months)', 'Photograph, white background', 'Vaccination certificate', 'Mahram details (for women travelling)', 'Visa applied', 'Hotels confirmed', 'Flights ticketed', 'Transport arranged', 'Final payment received', 'Documents handed to the pilgrim'],
+  hotels: ['Guest names', 'Check-in and check-out dates', 'Room type and meal plan', 'Booking confirmed', 'Voucher sent', 'Payment received'],
+  tours: ['Itinerary finalised', 'Traveller names and ages', 'ID copies', 'Hotels confirmed', 'Transport confirmed', 'Activities confirmed', 'Final payment received', 'Vouchers and tickets sent'],
+  tailor: ['Itinerary finalised', 'Traveller names and ages', 'ID copies', 'Hotels confirmed', 'Transport confirmed', 'Activities confirmed', 'Final payment received', 'Vouchers and tickets sent'],
+  corporate: ['Company GST details', 'Traveller list', 'Approval from the company', 'Booking confirmed', 'Invoice sent'],
+  insurance: ['Traveller dates of birth and passports', 'Plan chosen', 'Premium received', 'Policy issued', 'Policy sent to the customer'],
+  flights: ['Names exactly as on ID', 'Fare confirmed with the customer', 'Payment received', 'Ticket issued', 'Ticket sent'],
+  other: [],
+}
 const SOURCES = ['website', 'phone', 'walk-in', 'whatsapp', 'referral', 'email', 'social', 'other']
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 const TRACE = /^[A-Za-z0-9-]{1,64}$/
@@ -200,6 +218,178 @@ async function customer(q) {
   return rpc('crm_customer', { p_key: key })
 }
 
+/* ---------------- orders for every other service ---------------- */
+
+const txt = (v, n) => String(v ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, n)
+const money = (v, label) => {
+  if (v === '' || v == null) return ''
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 0 || n > 1e8) throw bad(`${label} does not look right.`)
+  return Math.round(n * 100) / 100
+}
+const dateOrBlank = (v, label) => { if (!v) return ''; if (!DATE.test(v)) throw bad(`${label} does not look right.`); return v }
+const travellersOf = (list) => (Array.isArray(list) ? list.slice(0, 30).map((t) => ({ name: txt(t?.name, 80), type: ['adult', 'child', 'infant'].includes(t?.type) ? t.type : 'adult', note: txt(t?.note, 200) })).filter((t) => t.name) : [])
+const checklistOf = (list) => (Array.isArray(list) ? list.slice(0, 40).map((c) => ({ item: txt(c?.item, 140), done: c?.done === true })).filter((c) => c.item) : [])
+
+const CASE_LIST = 'id,created_at,case_ref,service,customer_name,phone,email,title,status,travel_date,due_date,amount_inr,paid_inr,assigned_to,enquiry_id'
+function caseFilters(q) {
+  const f = []
+  if (CASE_STATUS.includes(q.status)) f.push(`status=eq.${q.status}`)
+  if (SERVICES.includes(q.service)) f.push(`service=eq.${q.service}`)
+  if (q.open === '1') f.push('status=not.in.(delivered,rejected,cancelled)')
+  if (q.due === 'soon') f.push(`due_date=lte.${istDay(Date.now() + 2 * 864e5)}`, 'status=not.in.(delivered,rejected,cancelled)')
+  if (q.unpaid === '1') f.push('status=not.in.(rejected,cancelled)')
+  const s = clean(q.q)
+  if (s) f.push(`or=(${['case_ref', 'customer_name', 'phone', 'email', 'title'].map((c) => `${c}.ilike.*${encodeURIComponent(s)}*`).join(',')})`)
+  if (DATE.test(q.from || '')) f.push(`created_at=gte.${q.from}T00:00:00%2B05:30`)
+  if (DATE.test(q.to || '')) f.push(`created_at=lte.${q.to}T23:59:59%2B05:30`)
+  return f
+}
+async function cases(q) {
+  const size = Math.min(100, Math.max(1, Number(q.size) || 25)), pg = Math.max(1, Number(q.page) || 1)
+  const { rows, count } = await db(`cases?select=${CASE_LIST}&${caseFilters(q).join('&')}&order=created_at.desc&limit=${size}&offset=${(pg - 1) * size}`, { prefer: 'count=exact' })
+  return { rows: rows || [], total: count ?? (rows || []).length, page: pg, size }
+}
+async function caseDetail(q) {
+  const id = Number(q.id)
+  if (!Number.isInteger(id) || id <= 0) throw bad('Bad order id')
+  const r = await rpc('crm_case_detail', { p_id: id })
+  if (!r) throw bad('Order not found', 404)
+  return { ...r, checklistTemplate: CHECKLISTS[r.case.service] || [] }
+}
+async function caseCreate(_q, body, _req, staff) {
+  const service = SERVICES.includes(body.service) ? body.service : null
+  if (!service) throw bad('Choose the service.')
+  const name = txt(body.customer_name, 80)
+  if (name.length < 2) throw bad("Enter the customer's name.")
+  const phone = String(body.phone || '').replace(/[^\d+ ()-]/g, '').trim().slice(0, 20)
+  const email = String(body.email || '').trim().toLowerCase().slice(0, 120)
+  if (!phone && !email) throw bad('Enter a phone number or an e-mail.')
+  if (email && !/^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/.test(email)) throw bad('That e-mail address does not look right.')
+  const enquiry = body.enquiry_id ? Number(body.enquiry_id) : ''
+  if (enquiry !== '' && (!Number.isInteger(enquiry) || enquiry <= 0)) throw bad('Bad enquiry.')
+  const given = checklistOf(body.checklist)
+  const p = {
+    service, enquiry_id: enquiry, customer_name: name, phone, email, title: txt(body.title, 140), travellers: travellersOf(body.travellers),
+    travel_date: dateOrBlank(body.travel_date, 'The travel date'), due_date: dateOrBlank(body.due_date, 'The deadline'), amount_inr: money(body.amount_inr, 'The amount'),
+    checklist: given.length ? given : (CHECKLISTS[service] || []).map((item) => ({ item, done: false })), assigned_to: clean(body.assigned_to, 60), notes: txt(body.notes, 2000),
+  }
+  const id = await rpc('crm_case_create', { p, p_actor: staff.email })
+  audit(staff.email, 'case.create', { id, service })
+  return { ok: true, id }
+}
+async function caseUpdate(_q, body, _req, staff) {
+  const id = Number(body.id)
+  if (!Number.isInteger(id) || id <= 0) throw bad('Bad order id')
+  const p = {}
+  if ('status' in body) { if (!CASE_STATUS.includes(body.status)) throw bad('Unknown status.'); p.status = body.status }
+  if ('title' in body) p.title = txt(body.title, 140)
+  if ('travel_date' in body) p.travel_date = dateOrBlank(body.travel_date, 'The travel date')
+  if ('due_date' in body) p.due_date = dateOrBlank(body.due_date, 'The deadline')
+  if ('amount_inr' in body) p.amount_inr = money(body.amount_inr, 'The amount')
+  if ('assigned_to' in body) p.assigned_to = clean(body.assigned_to, 60)
+  if ('travellers' in body) p.travellers = travellersOf(body.travellers)
+  if ('checklist' in body) p.checklist = checklistOf(body.checklist)
+  if ('notes' in body) p.notes = txt(body.notes, 2000)
+  if (body.note) p.note = txt(body.note, 2000)
+  const out = await rpc('crm_case_update', { p_id: id, p, p_actor: staff.email })
+  if (!out?.found) throw bad('Not found', 404)
+  audit(staff.email, 'case.update', { id, fields: Object.keys(p) })
+  return { ok: true }
+}
+async function casePayment(_q, body, _req, staff) {
+  const id = Number(body.id)
+  if (!Number.isInteger(id) || id <= 0) throw bad('Bad order id')
+  const amount = Number(body.amount)
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 1e8) throw bad('Enter the amount received.')
+  const mode = PAY_MODES.includes(body.mode) ? body.mode : 'cash'
+  const out = await rpc('crm_case_payment', { p_id: id, p: { amount: Math.round(amount * 100) / 100, mode, ref: txt(body.ref, 60), note: txt(body.note, 200) }, p_actor: staff.email })
+  if (!out?.found) throw bad('Not found', 404)
+  if (!out.ok) throw bad('Enter the amount received.')
+  audit(staff.email, 'case.payment', { id, amount, mode })
+  return { ok: true, paid: out.paid }
+}
+
+/* ---------------- invoices ---------------- */
+
+const INVOICE_LIST = 'id,created_at,invoice_no,issued_on,customer_name,phone,email,subtotal,gst_percent,gst_amount,total,status,case_id,booking_id'
+async function invoices(q) {
+  const size = Math.min(100, Math.max(1, Number(q.size) || 25)), pg = Math.max(1, Number(q.page) || 1)
+  const f = []
+  if (['issued', 'cancelled'].includes(q.status)) f.push(`status=eq.${q.status}`)
+  const s = clean(q.q)
+  if (s) f.push(`or=(${['invoice_no', 'customer_name', 'phone', 'email'].map((c) => `${c}.ilike.*${encodeURIComponent(s)}*`).join(',')})`)
+  if (Number(q.case_id) > 0) f.push(`case_id=eq.${Number(q.case_id)}`)
+  if (Number(q.booking_id) > 0) f.push(`booking_id=eq.${Number(q.booking_id)}`)
+  const { rows, count } = await db(`invoices?select=${INVOICE_LIST}&${f.join('&')}&order=created_at.desc&limit=${size}&offset=${(pg - 1) * size}`, { prefer: 'count=exact' })
+  return { rows: rows || [], total: count ?? (rows || []).length, page: pg, size }
+}
+async function invoice(q) {
+  const id = Number(q.id)
+  if (!Number.isInteger(id) || id <= 0) throw bad('Bad invoice id')
+  const { rows } = await db(`invoices?id=eq.${id}&select=*`)
+  if (!rows?.[0]) throw bad('Invoice not found', 404)
+  return { invoice: rows[0], business: await business() }
+}
+async function invoiceCreate(_q, body, _req, staff) {
+  const name = txt(body.customer_name, 80)
+  if (name.length < 2) throw bad("Enter the customer's name.")
+  const gst = Number(body.gst_percent || 0)
+  if (!GST_RATES.includes(gst)) throw bad('Choose a GST rate: 0, 5, 12, 18 or 28.')
+  const lines = (Array.isArray(body.lines) ? body.lines : []).slice(0, 30).map((l) => ({ desc: txt(l?.desc, 200), qty: Number(l?.qty ?? 1), rate: Number(l?.rate) })).filter((l) => l.desc)
+  if (!lines.length) throw bad('Add at least one line with a description and an amount.')
+  for (const l of lines) if (!Number.isFinite(l.qty) || l.qty <= 0 || l.qty > 1000 || !Number.isFinite(l.rate) || l.rate < 0 || l.rate > 1e8) throw bad('A line has a quantity or an amount that does not look right.')
+  const gstin = String(body.customer_gstin || '').trim().toUpperCase()
+  if (gstin && !/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(gstin)) throw bad('The customer GST number is not valid.')
+  const out = await rpc('crm_invoice_create', {
+    p: { case_id: Number(body.case_id) > 0 ? Number(body.case_id) : '', booking_id: Number(body.booking_id) > 0 ? Number(body.booking_id) : '', customer_name: name, phone: txt(body.phone, 20), email: txt(body.email, 120), address: txt(body.address, 300), customer_gstin: gstin, gst_percent: gst, lines, notes: txt(body.notes, 500) },
+    p_actor: staff.email,
+  })
+  if (!out?.ok) throw bad('The invoice amounts do not look right. Every invoice needs a total above zero.')
+  audit(staff.email, 'invoice.create', { invoice_no: out.invoice_no, total: out.total })
+  return out
+}
+async function invoiceCancel(_q, body, _req, staff) {
+  const id = Number(body.id)
+  if (!Number.isInteger(id) || id <= 0) throw bad('Bad invoice id')
+  const reason = txt(body.reason, 200)
+  if (reason.length < 4) throw bad('Write why the invoice is being cancelled.')
+  const out = await rpc('crm_invoice_cancel', { p_id: id, p_actor: staff.email, p_reason: reason })
+  if (!out?.ok) throw bad('That invoice is already cancelled or does not exist.', 404)
+  audit(staff.email, 'invoice.cancel', { invoice_no: out.invoice_no })
+  return out
+}
+
+/** The business details printed on invoices (legal name, GSTIN, address...). Kept in site_content. */
+async function business() {
+  const row = await rpc('crm_get_setting', { p_key: 'business' }).catch(() => null)
+  return row?.value || { legal_name: 'Pro Tours and Travel Solutions', gstin: '', pan: '', address: '21/1 G-2 Plain Street, A.M. Plaza, Hospital Road, Bangalore - 560 001', state: 'Karnataka', phone: '+91 99005 17604', email: 'luckysaj@gmail.com', terms: '' }
+}
+async function businessSave(_q, body, _req, staff) {
+  const gstin = String(body.gstin || '').trim().toUpperCase(), pan = String(body.pan || '').trim().toUpperCase()
+  if (gstin && !/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(gstin)) throw bad('That GST number is not valid.')
+  if (pan && !/^[A-Z]{5}\d{4}[A-Z]$/.test(pan)) throw bad('That PAN is not valid.')
+  const v = { legal_name: txt(body.legal_name, 120), gstin, pan, address: txt(body.address, 300), state: txt(body.state, 60), phone: txt(body.phone, 30), email: txt(body.email, 120), terms: txt(body.terms, 600) }
+  if (v.legal_name.length < 2) throw bad('Enter the business name.')
+  await rpc('crm_set_setting', { p_key: 'business', p_value: v })
+  audit(staff.email, 'business.save', {})
+  return v
+}
+
+/** Small counts for the tab badges (new enquiries, follow-ups due, bookings needing attention, orders needing documents...). */
+const badges = () => rpc('crm_badges')
+
+/** Staff say two customer records are the same person. */
+async function customerLink(_q, body, _req, staff) {
+  const norm = (v) => { const s = String(v || '').trim().toLowerCase(); const d = s.replace(/\D/g, ''); return s.includes('@') ? s : d.length >= 10 ? d.slice(-10) : '' }
+  const a = norm(body.a), b = norm(body.b)
+  if (!a || !b) throw bad('Enter a phone number (10 digits) or an e-mail for the other record.')
+  const out = await rpc('crm_link_customers', { p_a: a, p_b: b, p_actor: staff.email })
+  if (!out?.ok) throw bad('Those are the same record already.')
+  audit(staff.email, 'customer.link', {})
+  return out
+}
+
 /** Status / assignee / note for a booking or an enquiry: the change and its timeline entries in one transaction. */
 async function update(entity, statuses, body, staff) {
   const id = Number(body.id)
@@ -322,10 +512,10 @@ const cell = (v) => {
 }
 
 async function exportCsv(q, _b, _r, staff) {
-  const kind = q.entity === 'enquiries' ? 'enquiry' : q.entity === 'payments' ? 'payment' : 'booking'
-  const table = kind === 'enquiry' ? 'enquiries' : kind === 'payment' ? 'payments' : 'flight_bookings'
-  const select = kind === 'enquiry' || kind === 'payment' ? '*' : BOOKING_LIST
-  const { rows } = kind === 'payment' ? await db(`payments?select=*&${paymentFilters(q).join('&')}&order=initiated_at.desc.nullslast&limit=5000`) : await withLegacyFallback(select, (sel) => db(`${table}?select=${sel}&${filters(q, kind).join('&')}&order=created_at.desc&limit=5000`))
+  const kind = q.entity === 'enquiries' ? 'enquiry' : q.entity === 'payments' ? 'payment' : q.entity === 'orders' ? 'order' : q.entity === 'invoices' ? 'invoice' : 'booking'
+  const table = kind === 'enquiry' ? 'enquiries' : kind === 'payment' ? 'payments' : kind === 'order' ? 'cases' : kind === 'invoice' ? 'invoices' : 'flight_bookings'
+  const select = ['enquiry', 'payment', 'order', 'invoice'].includes(kind) ? '*' : BOOKING_LIST
+  const { rows } = kind === 'order' || kind === 'invoice' ? await db(`${table}?select=*&order=created_at.desc&limit=5000`) : kind === 'payment' ? await db(`payments?select=*&${paymentFilters(q).join('&')}&order=initiated_at.desc.nullslast&limit=5000`) : await withLegacyFallback(select, (sel) => db(`${table}?select=${sel}&${filters(q, kind).join('&')}&order=created_at.desc&limit=5000`))
   const list = rows || []
   const cols = list.length ? Object.keys(list[0]) : []
   const csv = [cols.join(','), ...list.map((r) => cols.map((c) => cell(r[c])).join(','))].join('\r\n')
@@ -337,8 +527,8 @@ async function exportCsv(q, _b, _r, staff) {
 
 const PUBLIC = { login, refresh: (_q, body) => refresh(String(body.refreshToken || '')) }
 const READ = {
-  me: (_q, _b, _r, staff) => ({ email: staff.email, env: isLive() ? 'live' : 'staging' }),
-  overview, bookings, booking, payments, customers, customer, enquiries, enquiry, traces, trace, balance, live, markup, export: exportCsv,
+  me: (_q, _b, _r, staff) => ({ email: staff.email, role: staff.role, env: isLive() ? 'live' : 'staging' }),
+  overview, bookings, booking, payments, customers, customer, cases, case: caseDetail, invoices, invoice, business, badges, enquiries, enquiry, traces, trace, balance, live, markup, export: exportCsv,
 }
 const WRITE = {
   bookingUpdate: (_q, b, _r, s) => update('booking', BOOKING_STATUS, b, s),
@@ -348,6 +538,13 @@ const WRITE = {
   markupSave,
   enquiryCreate,
   enquiryFields,
+  caseCreate,
+  caseUpdate,
+  casePayment,
+  invoiceCreate,
+  invoiceCancel,
+  businessSave,
+  customerLink,
 }
 
 const SAFE_ERRORS = new Set(['DbError', 'AuthError', 'TboError', 'PayError'])
@@ -364,6 +561,7 @@ export default async function handler(req, res) {
     const fn = open || (req.method === 'POST' ? WRITE[action] : READ[action])
     if (!fn) return res.status(400).json({ error: 'Unknown action' })
     const staff = open ? null : await requireStaff(req)
+    if (staff && ADMIN_ONLY.has(action) && staff.role !== 'admin') throw bad('This needs an administrator. Ask the owner.', 403)
     const out = await fn(q, body, req, staff)
     if (out && out.csv !== undefined) {
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')

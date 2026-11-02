@@ -163,6 +163,85 @@ create index if not exists payments_status on payments (status, initiated_at des
 create index if not exists payments_vpa on payments (lower(vpa));
 alter table payments enable row level security;
 
+
+-- The timeline also serves orders ("cases") and invoices.
+do $$ begin
+  alter table crm_events drop constraint if exists crm_events_entity_check;
+  alter table crm_events add constraint crm_events_entity_check check (entity in ('booking', 'enquiry', 'case', 'invoice'));
+end $$;
+
+-- Orders for every service that is not an online flight booking: visa, passport, Umrah / Hajj, hotels, tours, insurance, corporate, offline flights.
+-- One row per customer order, with its document checklist, travellers, and the payments received by cash, UPI or bank transfer.
+create table if not exists cases (
+  id           bigserial primary key,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now(),
+  case_ref     text unique,
+  service      text not null,
+  enquiry_id   bigint,
+  customer_name text not null,
+  phone        text,
+  email        text,
+  title        text,                                   -- "Dubai tourist visa, 2 adults"
+  status       text not null default 'docs_pending'
+               check (status in ('docs_pending', 'docs_received', 'in_progress', 'submitted', 'approved', 'delivered', 'rejected', 'cancelled')),
+  travellers   jsonb not null default '[]',            -- [{name, type, note}]  (no passport numbers kept here)
+  travel_date  date,
+  due_date     date,                                   -- deadline for the paperwork
+  amount_inr   numeric(12,2),                          -- what the customer pays us
+  paid_inr     numeric(12,2) not null default 0,
+  payments     jsonb not null default '[]',            -- [{id, at, amount, mode, ref, note, by}]
+  checklist    jsonb not null default '[]',            -- [{item, done}]
+  assigned_to  text,
+  notes        text
+);
+create index if not exists cases_status on cases (status, created_at desc);
+create index if not exists cases_service on cases (service, created_at desc);
+create index if not exists cases_due on cases (due_date) where due_date is not null;
+create index if not exists cases_phone on cases (phone);
+drop trigger if exists cases_updated on cases;
+create trigger cases_updated before update on cases for each row execute function set_updated_at();
+
+-- Invoices. Numbers run in order inside each financial year (April to March) and are never reused: a wrong invoice is cancelled, not deleted.
+create table if not exists invoice_counters (fy text primary key, n int not null default 0);
+create table if not exists invoices (
+  id            bigserial primary key,
+  created_at    timestamptz not null default now(),
+  invoice_no    text unique not null,
+  issued_on     date not null,
+  case_id       bigint,
+  booking_id    bigint,
+  customer_name text not null,
+  phone         text,
+  email         text,
+  address       text,
+  customer_gstin text,
+  lines         jsonb not null,                        -- [{desc, qty, rate, amount}]
+  subtotal      numeric(12,2) not null,
+  gst_percent   numeric(5,2) not null default 0,
+  gst_amount    numeric(12,2) not null default 0,
+  total         numeric(12,2) not null,
+  status        text not null default 'issued' check (status in ('issued', 'cancelled')),
+  notes         text,
+  created_by    text
+);
+create index if not exists invoices_created on invoices (created_at desc);
+create index if not exists invoices_case on invoices (case_id);
+create index if not exists invoices_booking on invoices (booking_id);
+
+-- Staff can say "these two customer records are the same person" (for example a phone number and an e-mail that never appear together).
+create table if not exists customer_aliases (
+  alias_key     text primary key,
+  canonical_key text not null,
+  created_by    text,
+  created_at    timestamptz not null default now()
+);
+
+alter table cases             enable row level security;
+alter table invoices          enable row level security;
+alter table invoice_counters  enable row level security;
+alter table customer_aliases  enable row level security;
+
 -- Every Razorpay webhook delivery, once (their X-Razorpay-Event-Id): retries and replays are recognised and ignored.
 create table if not exists payment_events (
   event_id    text primary key,
@@ -340,7 +419,7 @@ begin
   return jsonb_build_object('found', true, 'changed', ch <> '{}'::jsonb);
 end $$;
 
--- Customer directory: bookings and enquiries joined on the phone number (last 10 digits) or, failing that, the e-mail.
+-- Customer directory. One person = the last 10 digits of the phone; an e-mail is folded into the phone it was ever seen with; staff links on top.
 create or replace function crm_customers(p_q text, p_limit int, p_offset int) returns jsonb language sql stable set search_path = public, pg_temp as $$
   with src as (
     select 'booking' as kind, id, customer_name as name, contact_phone as phone, contact_email as email, created_at,
@@ -348,13 +427,23 @@ create or replace function crm_customers(p_q text, p_limit int, p_offset int) re
       from flight_bookings where status <> 'payment_pending' or created_at > now() - interval '2 days'
     union all
     select 'enquiry', id, name, phone, email, created_at, case when status = 'won' then coalesce(final_inr, quoted_inr, 0) else 0 end, coalesce(service, 'other') from enquiries
+    union all
+    select 'order', id, customer_name, phone, email, created_at, coalesce(paid_inr, 0), service from cases where status <> 'cancelled'
+  ), p10 as (
+    select *, case when length(regexp_replace(coalesce(phone, ''), '\D', '', 'g')) >= 10 then right(regexp_replace(phone, '\D', '', 'g'), 10) end as ph, lower(nullif(email, '')) as em from src
+  ), email_phone as (
+    select em, max(ph) as ph from p10 where em is not null and ph is not null group by em
   ), keyed as (
-    select *, coalesce(nullif(case when length(regexp_replace(coalesce(phone, ''), '\D', '', 'g')) >= 10 then right(regexp_replace(phone, '\D', '', 'g'), 10) end, ''), lower(nullif(email, ''))) as ck from src
+    select p10.*, coalesce(al.canonical_key, base.k) as ck
+      from p10
+      left join email_phone ep on ep.em = p10.em
+      cross join lateral (select coalesce(p10.ph, ep.ph, p10.em) as k) base
+      left join customer_aliases al on al.alias_key = base.k
   ), grouped as (
     select ck, (array_agg(name order by created_at desc) filter (where name is not null and name <> ''))[1] as name,
            (array_agg(phone order by created_at desc) filter (where phone is not null and phone <> ''))[1] as phone,
            (array_agg(email order by created_at desc) filter (where email is not null and email <> ''))[1] as email,
-           count(*) filter (where kind = 'booking') as bookings, count(*) filter (where kind = 'enquiry') as enquiries,
+           count(*) filter (where kind = 'booking') as bookings, count(*) filter (where kind = 'enquiry') as enquiries, count(*) filter (where kind = 'order') as orders,
            sum(spent) as spent, array_agg(distinct service) as services, max(created_at) as last_at, min(created_at) as first_at
       from keyed where ck is not null group by ck
   ), found as (
@@ -364,16 +453,171 @@ create or replace function crm_customers(p_q text, p_limit int, p_offset int) re
     'rows', coalesce((select jsonb_agg(to_jsonb(r)) from (select * from found order by last_at desc limit least(greatest(p_limit, 1), 100) offset greatest(p_offset, 0)) r), '[]'::jsonb))
 $$;
 
--- One customer's whole history.
-create or replace function crm_customer(p_key text) returns jsonb language sql stable set search_path = public, pg_temp as $$
-  select jsonb_build_object(
+-- One customer's whole history. The key is what the list gave (phone digits or e-mail); every identity linked to it is searched too.
+create or replace function crm_customer(p_key text) returns jsonb language plpgsql stable set search_path = public, pg_temp as $$
+declare ids text[]; phones text[]; emails text[];
+begin
+  ids := array[lower(trim(p_key))] || coalesce((select array_agg(alias_key) from customer_aliases where canonical_key = any (array[lower(trim(p_key))] || coalesce((select array_agg(canonical_key) from customer_aliases where alias_key = lower(trim(p_key))), '{}'))), '{}')
+         || coalesce((select array_agg(canonical_key) from customer_aliases where alias_key = lower(trim(p_key))), '{}');
+  phones := array(select distinct i from unnest(ids) i where i ~ '^\d{10}$');
+  emails := array(select distinct i from unnest(ids) i where i like '%@%');
+  -- an e-mail seen together with one of these phones (or the other way round) is the same person
+  emails := array(select distinct e from unnest(emails || coalesce((select array_agg(lower(x.email)) from (
+      select contact_email as email, contact_phone as phone from flight_bookings union all select email, phone from enquiries union all select email, phone from cases) x
+      where lower(x.email) is not null and right(regexp_replace(coalesce(x.phone, ''), '\D', '', 'g'), 10) = any (phones)), '{}')) e where e is not null);
+  phones := array(select distinct ph from unnest(phones || coalesce((select array_agg(right(regexp_replace(x.phone, '\D', '', 'g'), 10)) from (
+      select contact_email as email, contact_phone as phone from flight_bookings union all select email, phone from enquiries union all select email, phone from cases) x
+      where length(regexp_replace(coalesce(x.phone, ''), '\D', '', 'g')) >= 10 and lower(x.email) = any (emails)), '{}')) ph where ph is not null);
+  return jsonb_build_object(
     'bookings', coalesce((select jsonb_agg(to_jsonb(b) order by b.created_at desc) from (
         select id, order_ref, status, amount_inr, route, travel_date, pnr, created_at, customer_name, contact_phone, contact_email from flight_bookings
-         where right(regexp_replace(coalesce(contact_phone, ''), '\D', '', 'g'), 10) = p_key or lower(contact_email) = lower(p_key)) b), '[]'::jsonb),
+         where right(regexp_replace(coalesce(contact_phone, ''), '\D', '', 'g'), 10) = any (phones) or lower(contact_email) = any (emails)) b), '[]'::jsonb),
     'enquiries', coalesce((select jsonb_agg(to_jsonb(e) order by e.created_at desc) from (
         select id, name, phone, email, topic, service, status, quoted_inr, final_inr, follow_up_at, created_at from enquiries
-         where right(regexp_replace(coalesce(phone, ''), '\D', '', 'g'), 10) = p_key or lower(email) = lower(p_key)) e), '[]'::jsonb))
+         where right(regexp_replace(coalesce(phone, ''), '\D', '', 'g'), 10) = any (phones) or lower(email) = any (emails)) e), '[]'::jsonb),
+    'orders', coalesce((select jsonb_agg(to_jsonb(c) order by c.created_at desc) from (
+        select id, case_ref, service, title, status, amount_inr, paid_inr, created_at from cases
+         where right(regexp_replace(coalesce(phone, ''), '\D', '', 'g'), 10) = any (phones) or lower(email) = any (emails)) c), '[]'::jsonb),
+    'linked', ids);
+end $$;
+
+
+-- ======================================================= orders (cases) =======================================================
+create or replace function crm_case_create(p jsonb, p_actor text) returns bigint language plpgsql set search_path = public, pg_temp as $$
+declare v_id bigint;
+begin
+  insert into cases (service, enquiry_id, customer_name, phone, email, title, status, travellers, travel_date, due_date, amount_inr, checklist, assigned_to, notes)
+  values (p->>'service', nullif(p->>'enquiry_id', '')::bigint, p->>'customer_name', nullif(p->>'phone', ''), nullif(p->>'email', ''), nullif(p->>'title', ''),
+          coalesce(nullif(p->>'status', ''), 'docs_pending'), coalesce(p->'travellers', '[]'::jsonb), nullif(p->>'travel_date', '')::date, nullif(p->>'due_date', '')::date,
+          nullif(p->>'amount_inr', '')::numeric, coalesce(p->'checklist', '[]'::jsonb), nullif(p->>'assigned_to', ''), nullif(p->>'notes', ''))
+  returning id into v_id;
+  update cases set case_ref = 'PTC-' || lpad(v_id::text, 5, '0') where id = v_id;
+  insert into crm_events (entity, entity_id, kind, actor, data) values ('case', v_id, 'created', p_actor, jsonb_build_object('service', p->>'service', 'title', p->>'title'));
+  if nullif(p->>'enquiry_id', '') is not null then
+    -- the enquiry it came from is now a won deal worth what this order is worth
+    update enquiries set status = 'won', final_inr = coalesce(nullif(p->>'amount_inr', '')::numeric, final_inr) where id = (p->>'enquiry_id')::bigint and status <> 'won';
+    insert into crm_events (entity, entity_id, kind, actor, data) values ('enquiry', (p->>'enquiry_id')::bigint, 'note', p_actor, jsonb_build_object('text', 'Order created: ' || 'PTC-' || lpad(v_id::text, 5, '0')));
+  end if;
+  return v_id;
+end $$;
+
+create or replace function crm_case_update(p_id bigint, p jsonb, p_actor text) returns jsonb language plpgsql set search_path = public, pg_temp as $$
+declare o cases%rowtype; ch jsonb := '{}'::jsonb; new_status text; done_before int; done_after int;
+begin
+  select * into o from cases where id = p_id for update;
+  if not found then return jsonb_build_object('found', false); end if;
+  new_status := nullif(p->>'status', '');
+  if new_status is not null and new_status <> o.status then
+    update cases set status = new_status where id = p_id;
+    insert into crm_events (entity, entity_id, kind, actor, data) values ('case', p_id, 'status', p_actor, jsonb_build_object('from', o.status, 'to', new_status));
+  end if;
+  if p ? 'checklist' then
+    select count(*) into done_before from jsonb_array_elements(o.checklist) x where (x->>'done')::boolean;
+    select count(*) into done_after from jsonb_array_elements(p->'checklist') x where (x->>'done')::boolean;
+    update cases set checklist = p->'checklist' where id = p_id;
+    if done_after <> done_before then insert into crm_events (entity, entity_id, kind, actor, data) values ('case', p_id, 'checklist', p_actor, jsonb_build_object('done', done_after, 'total', jsonb_array_length(p->'checklist'))); end if;
+  end if;
+  if p ? 'title' and p->>'title' is distinct from o.title then ch := ch || jsonb_build_object('title', jsonb_build_array(o.title, p->>'title')); end if;
+  if p ? 'due_date' and nullif(p->>'due_date', '')::date is distinct from o.due_date then ch := ch || jsonb_build_object('due_date', jsonb_build_array(o.due_date, nullif(p->>'due_date', ''))); end if;
+  if p ? 'travel_date' and nullif(p->>'travel_date', '')::date is distinct from o.travel_date then ch := ch || jsonb_build_object('travel_date', jsonb_build_array(o.travel_date, nullif(p->>'travel_date', ''))); end if;
+  if p ? 'amount_inr' and nullif(p->>'amount_inr', '')::numeric is distinct from o.amount_inr then ch := ch || jsonb_build_object('amount_inr', jsonb_build_array(o.amount_inr, nullif(p->>'amount_inr', ''))); end if;
+  if p ? 'assigned_to' and nullif(p->>'assigned_to', '') is distinct from o.assigned_to then ch := ch || jsonb_build_object('assigned_to', jsonb_build_array(o.assigned_to, nullif(p->>'assigned_to', ''))); end if;
+  update cases set
+    title = case when p ? 'title' then nullif(p->>'title', '') else title end,
+    due_date = case when p ? 'due_date' then nullif(p->>'due_date', '')::date else due_date end,
+    travel_date = case when p ? 'travel_date' then nullif(p->>'travel_date', '')::date else travel_date end,
+    amount_inr = case when p ? 'amount_inr' then nullif(p->>'amount_inr', '')::numeric else amount_inr end,
+    assigned_to = case when p ? 'assigned_to' then nullif(p->>'assigned_to', '') else assigned_to end,
+    travellers = case when p ? 'travellers' then p->'travellers' else travellers end,
+    notes = case when p ? 'notes' then nullif(p->>'notes', '') else notes end
+  where id = p_id;
+  if ch <> '{}'::jsonb then insert into crm_events (entity, entity_id, kind, actor, data) values ('case', p_id, 'details', p_actor, ch); end if;
+  if coalesce(p->>'note', '') <> '' then insert into crm_events (entity, entity_id, kind, actor, data) values ('case', p_id, 'note', p_actor, jsonb_build_object('text', p->>'note')); end if;
+  return jsonb_build_object('found', true);
+end $$;
+
+-- A payment received for an order (cash, UPI, bank transfer, card machine...). paid_inr is always the sum of the list.
+create or replace function crm_case_payment(p_id bigint, p jsonb, p_actor text) returns jsonb language plpgsql set search_path = public, pg_temp as $$
+declare v_amt numeric := (p->>'amount')::numeric; v_paid numeric; v_entry jsonb;
+begin
+  if v_amt is null or v_amt <= 0 then return jsonb_build_object('found', true, 'ok', false, 'error', 'amount'); end if;
+  perform 1 from cases where id = p_id for update;
+  if not found then return jsonb_build_object('found', false); end if;
+  v_entry := jsonb_build_object('id', substr(md5(random()::text || clock_timestamp()::text), 1, 8), 'at', now(), 'amount', v_amt, 'mode', coalesce(nullif(p->>'mode', ''), 'cash'),
+                                'ref', nullif(p->>'ref', ''), 'note', nullif(p->>'note', ''), 'by', p_actor);
+  update cases set payments = payments || jsonb_build_array(v_entry),
+                   paid_inr = (select coalesce(sum((x->>'amount')::numeric), 0) from jsonb_array_elements(payments || jsonb_build_array(v_entry)) x)
+   where id = p_id returning paid_inr into v_paid;
+  insert into crm_events (entity, entity_id, kind, actor, data) values ('case', p_id, 'payment_in', p_actor, jsonb_build_object('amount', v_amt, 'mode', v_entry->>'mode', 'ref', v_entry->>'ref'));
+  return jsonb_build_object('found', true, 'ok', true, 'paid', v_paid);
+end $$;
+
+create or replace function crm_case_detail(p_id bigint) returns jsonb language sql stable set search_path = public, pg_temp as $$
+  select jsonb_build_object('case', to_jsonb(c),
+    'events', coalesce((select jsonb_agg(to_jsonb(e) order by e.created_at, e.id) from crm_events e where e.entity = 'case' and e.entity_id = c.id), '[]'::jsonb),
+    'invoices', coalesce((select jsonb_agg(jsonb_build_object('id', i.id, 'invoice_no', i.invoice_no, 'total', i.total, 'status', i.status, 'issued_on', i.issued_on) order by i.created_at desc) from invoices i where i.case_id = c.id), '[]'::jsonb))
+  from cases c where c.id = p_id
 $$;
+
+-- ======================================================= invoices =======================================================
+create or replace function crm_invoice_create(p jsonb, p_actor text) returns jsonb language plpgsql set search_path = public, pg_temp as $$
+declare v_day date := (now() at time zone 'Asia/Kolkata')::date; v_fy text; v_n int; v_lines jsonb; v_sub numeric; v_gst numeric := coalesce(nullif(p->>'gst_percent', '')::numeric, 0);
+        v_gst_amt numeric; v_id bigint; v_no text;
+begin
+  -- recompute every line and the totals here: the totals on an invoice are never taken from the browser
+  select coalesce(jsonb_agg(jsonb_build_object('desc', x->>'desc', 'qty', q, 'rate', r, 'amount', round(q * r, 2)) order by ord), '[]'::jsonb), coalesce(sum(round(q * r, 2)), 0)
+    into v_lines, v_sub
+    from (select x, ord, coalesce(nullif(x->>'qty', '')::numeric, 1) as q, (x->>'rate')::numeric as r from jsonb_array_elements(p->'lines') with ordinality t(x, ord)) l
+   where coalesce(x->>'desc', '') <> '';
+  if v_sub is null or jsonb_array_length(v_lines) = 0 or v_sub <= 0 then return jsonb_build_object('ok', false, 'error', 'lines'); end if;
+  if v_gst < 0 or v_gst > 28 then return jsonb_build_object('ok', false, 'error', 'gst'); end if;
+  v_gst_amt := round(v_sub * v_gst / 100, 2);
+  v_fy := case when extract(month from v_day) >= 4 then extract(year from v_day)::int || '-' || lpad(((extract(year from v_day)::int + 1) % 100)::text, 2, '0')
+               else (extract(year from v_day)::int - 1) || '-' || lpad((extract(year from v_day)::int % 100)::text, 2, '0') end;
+  insert into invoice_counters (fy, n) values (v_fy, 1) on conflict (fy) do update set n = invoice_counters.n + 1 returning n into v_n;
+  v_no := 'PT/' || v_fy || '/' || lpad(v_n::text, 4, '0');
+  insert into invoices (invoice_no, issued_on, case_id, booking_id, customer_name, phone, email, address, customer_gstin, lines, subtotal, gst_percent, gst_amount, total, notes, created_by)
+  values (v_no, v_day, nullif(p->>'case_id', '')::bigint, nullif(p->>'booking_id', '')::bigint, p->>'customer_name', nullif(p->>'phone', ''), nullif(p->>'email', ''), nullif(p->>'address', ''),
+          nullif(upper(p->>'customer_gstin'), ''), v_lines, v_sub, v_gst, v_gst_amt, v_sub + v_gst_amt, nullif(p->>'notes', ''), p_actor)
+  returning id into v_id;
+  if nullif(p->>'case_id', '') is not null then insert into crm_events (entity, entity_id, kind, actor, data) values ('case', (p->>'case_id')::bigint, 'invoice', p_actor, jsonb_build_object('invoice_no', v_no, 'total', v_sub + v_gst_amt)); end if;
+  if nullif(p->>'booking_id', '') is not null then insert into crm_events (entity, entity_id, kind, actor, data) values ('booking', (p->>'booking_id')::bigint, 'invoice', p_actor, jsonb_build_object('invoice_no', v_no, 'total', v_sub + v_gst_amt)); end if;
+  return jsonb_build_object('ok', true, 'id', v_id, 'invoice_no', v_no, 'total', v_sub + v_gst_amt);
+end $$;
+
+create or replace function crm_invoice_cancel(p_id bigint, p_actor text, p_reason text) returns jsonb language plpgsql set search_path = public, pg_temp as $$
+declare v_no text;
+begin
+  update invoices set status = 'cancelled', notes = coalesce(notes || E'\n', '') || 'Cancelled by ' || p_actor || ': ' || left(coalesce(p_reason, ''), 200) where id = p_id and status = 'issued' returning invoice_no into v_no;
+  if v_no is null then return jsonb_build_object('ok', false); end if;
+  insert into crm_events (entity, entity_id, kind, actor, data) values ('invoice', p_id, 'cancelled', p_actor, jsonb_build_object('invoice_no', v_no, 'reason', left(coalesce(p_reason, ''), 200)));
+  return jsonb_build_object('ok', true, 'invoice_no', v_no);
+end $$;
+
+-- ======================================================= alerts for the CRM tabs =======================================================
+create or replace function crm_badges() returns jsonb language sql stable set search_path = public, pg_temp as $$
+  with tz as (select (now() at time zone 'Asia/Kolkata')::date as today)
+  select jsonb_build_object(
+    'enquiriesNew', (select count(*) from enquiries where status = 'new'),
+    'followupsDue', (select count(*) from enquiries where follow_up_at <= (select today from tz) and status in ('new', 'contacted', 'quoted')),
+    'bookingsAttention', (select count(*) from flight_bookings where status in ('needs_attention', 'failed')),
+    'casesDocs', (select count(*) from cases where status in ('docs_pending', 'docs_received')),
+    'casesDue', (select count(*) from cases where due_date <= (select today from tz) + 2 and status not in ('delivered', 'rejected', 'cancelled')),
+    'casesUnpaid', (select count(*) from cases where status in ('approved', 'delivered') and coalesce(amount_inr, 0) > paid_inr))
+$$;
+
+-- ======================================================= merging customers =======================================================
+create or replace function crm_link_customers(p_a text, p_b text, p_actor text) returns jsonb language plpgsql set search_path = public, pg_temp as $$
+declare a text := lower(trim(p_a)); b text := lower(trim(p_b)); ca text; cb text;
+begin
+  if a = '' or b = '' or a = b then return jsonb_build_object('ok', false); end if;
+  ca := coalesce((select canonical_key from customer_aliases where alias_key = a), a);
+  cb := coalesce((select canonical_key from customer_aliases where alias_key = b), b);
+  if ca = cb then return jsonb_build_object('ok', true, 'already', true); end if;
+  insert into customer_aliases (alias_key, canonical_key, created_by) values (cb, ca, p_actor) on conflict (alias_key) do update set canonical_key = excluded.canonical_key;
+  update customer_aliases set canonical_key = ca where canonical_key = cb;
+  return jsonb_build_object('ok', true);
+end $$;
 
 -- Dashboard: every number in one query, aggregated in the database (no rows shipped to the server).
 create or replace function crm_overview() returns jsonb language sql stable set search_path = public, pg_temp as $$
@@ -663,18 +907,21 @@ end $$;
 update enquiries set service = crm_service_of(topic) where service is null;
 
 -- ---- lock everything to the server's secret key (service_role) only ----
-revoke all on table tbo_logs, flight_bookings, enquiries, crm_events, site_content, payment_events, payments from anon, authenticated;
+revoke all on table tbo_logs, flight_bookings, enquiries, crm_events, site_content, payment_events, payments, cases, invoices, invoice_counters, customer_aliases from anon, authenticated;
+revoke all on sequence cases_id_seq, invoices_id_seq from anon, authenticated;
 revoke all on sequence tbo_logs_id_seq, flight_bookings_id_seq, enquiries_id_seq, crm_events_id_seq from anon, authenticated;
 revoke all on function crm_record_checkout(jsonb), crm_record_paid(text, text), crm_record_payment_failed(text, text), crm_record_outcome(jsonb), crm_add_enquiry(jsonb),
   crm_overview(), crm_booking_detail(bigint), crm_apply_update(text, bigint, text, text, boolean, text, text), crm_traces(int, int), crm_cleanup(int, int), set_updated_at(),
   acct_bookings(uuid, text), acct_booking(uuid, text, text),
   crm_claim_ticketing(text, text, numeric), crm_for_order(text), crm_outcome(text), crm_webhook_seen(text, text, text, text), crm_webhook_done(text, text),
   crm_payment_note(text, text, jsonb), crm_mark_unfulfilled(text, text, numeric, text), crm_booking_for_refund(bigint), crm_record_refund(jsonb), crm_stale_pending(int), crm_get_setting(text), crm_set_setting(text, jsonb), crm_upsert_payment(jsonb), crm_booking_payments(text),
-  crm_service_of(text), crm_services_summary(), crm_staff_add_enquiry(jsonb, text), crm_enquiry_fields(bigint, jsonb, text), crm_customers(text, int, int), crm_customer(text)
+  crm_service_of(text), crm_services_summary(), crm_staff_add_enquiry(jsonb, text), crm_enquiry_fields(bigint, jsonb, text), crm_customers(text, int, int), crm_customer(text),
+  crm_case_create(jsonb, text), crm_case_update(bigint, jsonb, text), crm_case_payment(bigint, jsonb, text), crm_case_detail(bigint), crm_invoice_create(jsonb, text), crm_invoice_cancel(bigint, text, text), crm_badges(), crm_link_customers(text, text, text)
   from public, anon, authenticated;
 grant execute on function crm_record_checkout(jsonb), crm_record_paid(text, text), crm_record_payment_failed(text, text), crm_record_outcome(jsonb), crm_add_enquiry(jsonb),
   crm_overview(), crm_booking_detail(bigint), crm_apply_update(text, bigint, text, text, boolean, text, text), crm_traces(int, int), crm_cleanup(int, int),
   acct_bookings(uuid, text), acct_booking(uuid, text, text),
   crm_claim_ticketing(text, text, numeric), crm_for_order(text), crm_outcome(text), crm_webhook_seen(text, text, text, text), crm_webhook_done(text, text),
   crm_payment_note(text, text, jsonb), crm_mark_unfulfilled(text, text, numeric, text), crm_booking_for_refund(bigint), crm_record_refund(jsonb), crm_stale_pending(int), crm_get_setting(text), crm_set_setting(text, jsonb), crm_upsert_payment(jsonb), crm_booking_payments(text),
-  crm_service_of(text), crm_services_summary(), crm_staff_add_enquiry(jsonb, text), crm_enquiry_fields(bigint, jsonb, text), crm_customers(text, int, int), crm_customer(text) to service_role;
+  crm_service_of(text), crm_services_summary(), crm_staff_add_enquiry(jsonb, text), crm_enquiry_fields(bigint, jsonb, text), crm_customers(text, int, int), crm_customer(text),
+  crm_case_create(jsonb, text), crm_case_update(bigint, jsonb, text), crm_case_payment(bigint, jsonb, text), crm_case_detail(bigint), crm_invoice_create(jsonb, text), crm_invoice_cancel(bigint, text, text), crm_badges(), crm_link_customers(text, text, text) to service_role;

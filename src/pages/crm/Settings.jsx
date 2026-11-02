@@ -5,6 +5,34 @@ import { crm, download, getSession, signOut } from './api.js'
 import { Card, Err, btnDark, btnLight, inr, input, whenFull } from './ui.jsx'
 
 
+/** The business details printed on invoices: legal name, GSTIN, PAN, address, terms. */
+function Business() {
+  const [f, setF] = useState(null)
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { crm('business').then((b) => setF({ legal_name: '', gstin: '', pan: '', address: '', state: '', phone: '', email: '', terms: '', ...b })).catch((e) => setErr(e.message)) }, [])
+  if (!f) return <Card title="Business details (printed on invoices)">{err ? <Err>{err}</Err> : <Loader2 className="animate-spin" />}</Card>
+  const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }))
+  const save = async (e) => { e.preventDefault(); setBusy(true); setErr(''); setMsg(''); try { setF(await crm('businessSave', f, 'POST')); setMsg('Saved.') } catch (x) { setErr(x.message) } finally { setBusy(false) } }
+  const L = 'text-[0.8rem] font-bold text-slate-600 uppercase'
+  return (
+    <Card title="Business details (printed on invoices)">
+      <form onSubmit={save} className="grid gap-3 sm:grid-cols-2">
+        <label className={`${L} sm:col-span-2`}>Legal name<input className={`${input} mt-1 normal-case`} required maxLength={120} value={f.legal_name} onChange={set('legal_name')} /></label>
+        <label className={L}>GSTIN (leave empty if not registered)<input className={`${input} mt-1`} maxLength={15} value={f.gstin} onChange={set('gstin')} placeholder="29ABCDE1234F1Z5" /></label>
+        <label className={L}>PAN<input className={`${input} mt-1`} maxLength={10} value={f.pan} onChange={set('pan')} /></label>
+        <label className={`${L} sm:col-span-2`}>Address<input className={`${input} mt-1 normal-case`} maxLength={300} value={f.address} onChange={set('address')} /></label>
+        <label className={L}>State<input className={`${input} mt-1 normal-case`} maxLength={60} value={f.state} onChange={set('state')} /></label>
+        <label className={L}>Phone<input className={`${input} mt-1 normal-case`} maxLength={30} value={f.phone} onChange={set('phone')} /></label>
+        <label className={`${L} sm:col-span-2`}>E-mail<input className={`${input} mt-1 normal-case`} maxLength={120} value={f.email} onChange={set('email')} /></label>
+        <label className={`${L} sm:col-span-2`}>Terms printed at the bottom of invoices<textarea className={`${input} mt-1 normal-case`} rows={3} maxLength={600} value={f.terms} onChange={set('terms')} placeholder="Payment due on receipt. Refunds as per our Cancellation & Refund Policy." /></label>
+        <div className="sm:col-span-2"><Err>{err}</Err>{msg && <p role="status" className="mb-2 text-[0.9rem] font-semibold text-emerald-700">{msg}</p>}<button className={btnDark} disabled={busy}>{busy ? <Loader2 size={16} className="animate-spin" /> : 'Save business details'}</button></div>
+      </form>
+    </Card>
+  )
+}
+
 /** The price markup: what is added to the airline's fare, domestic and international separately: a percentage, a flat amount, or both. */
 function Markup({ onSaved }) {
   const [m, setM] = useState(null) // what the server has
@@ -73,7 +101,7 @@ function Markup({ onSaved }) {
   )
 }
 
-export default function Settings() {
+export default function Settings({ admin = true, role = 'admin' }) {
   const [o, setO] = useState(null)
   const [wallet, setWallet] = useState(null)
   const [err, setErr] = useState('')
@@ -88,7 +116,7 @@ export default function Settings() {
       <Err>{err}</Err>
       <Card title="This system">
         <dl className="grid grid-cols-[10rem_1fr] gap-y-1.5 text-[0.92rem]">
-          <dt className="text-slate-500">Signed in as</dt><dd className="font-semibold">{getSession()?.email}</dd>
+          <dt className="text-slate-500">Signed in as</dt><dd className="font-semibold">{getSession()?.email} <span className="ml-1 rounded-full bg-sand px-2 py-0.5 text-[0.72rem] font-bold uppercase">{role}</span></dd>
           <dt className="text-slate-500">TBO environment</dt><dd className="font-semibold">{o ? (o.env === 'live' ? 'Live (real tickets)' : 'Staging (test tickets)') : '…'}</dd>
           <dt className="text-slate-500">Payments</dt><dd className="font-semibold">{o?.payments || '…'}</dd>
           <dt className="text-slate-500">Markup</dt><dd className="font-semibold">{o ? `Domestic ${o.markup.domestic.percent}% + ${inr(o.markup.domestic.flat)} · International ${o.markup.international.percent}% + ${inr(o.markup.international.flat)}` : '…'}</dd>
@@ -96,27 +124,31 @@ export default function Settings() {
         <button className={`${btnLight} mt-4`} onClick={signOut}><LogOut size={16} /> Sign out</button>
       </Card>
 
-      <Markup onSaved={() => crm('overview').then(setO).catch(() => {})} />
+      {admin ? <Markup onSaved={() => crm('overview').then(setO).catch(() => {})} /> : <Card title="Price markup"><p className="text-[0.9rem] text-slate-600">Only an administrator can change prices. Ask the owner.</p></Card>}
+      {admin && <Business />}
 
       <Card title="TBO wallet">
         {wallet ? <p className="text-[0.95rem]">{wallet.agencyType} account · cash <strong>{inr(wallet.cash)}</strong> · credit <strong>{inr(wallet.credit)}</strong></p> : <p className="text-[0.9rem] text-slate-600">Tickets are paid from this balance. Check it before a busy day.</p>}
         <button className={`${btnLight} mt-3`} disabled={busy === 'wallet'} onClick={() => run('wallet', async () => setWallet(await crm('balance')))}>{busy === 'wallet' ? <Loader2 size={16} className="animate-spin" /> : <Wallet size={16} />} Check balance</button>
       </Card>
 
-      <Card title="Export">
+      {admin && <Card title="Export">
         <p className="text-[0.9rem] text-slate-600">Download everything as a spreadsheet (CSV). Filters on the Bookings and Enquiries tabs apply to their own export buttons.</p>
         <div className="mt-3 flex flex-wrap gap-2">
           <button className={btnLight} onClick={() => run('e1', () => download('bookings'))}><Download size={16} /> All bookings</button>
           <button className={btnLight} onClick={() => run('e2', () => download('enquiries'))}><Download size={16} /> All enquiries</button>
+          <button className={btnLight} onClick={() => run('e3', () => download('orders'))}><Download size={16} /> All orders</button>
+          <button className={btnLight} onClick={() => run('e4', () => download('invoices'))}><Download size={16} /> All invoices</button>
+          <button className={btnLight} onClick={() => run('e5', () => download('payments'))}><Download size={16} /> All payments</button>
         </div>
-      </Card>
+      </Card>}
 
-      <Card title="Privacy clean-up">
+      {admin && <Card title="Privacy clean-up">
         <p className="text-[0.9rem] text-slate-600">Our Privacy Policy says enquiries that do not become a booking are deleted within 12 months. This deletes enquiries older than 12 months, except the ones marked <strong>Won</strong>. Bookings and payment records are kept (the law requires 8 years).</p>
         <label className="mt-3 flex items-center gap-2 text-[0.9rem] font-semibold"><input type="checkbox" className="h-4 w-4" checked={confirm} onChange={(e) => setConfirm(e.target.checked)} /> I understand this cannot be undone</label>
         <button className={`${btnDark} mt-3`} disabled={!confirm || busy === 'purge'} onClick={() => run('purge', async () => { setPurged(await crm('purge', { confirm: true, months: 12 }, 'POST')); setConfirm(false) })}>{busy === 'purge' ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />} Delete old enquiries</button>
         {purged && <p className="mt-3 text-[0.9rem] font-semibold text-emerald-800">Deleted {purged.deleted} enquir{purged.deleted === 1 ? 'y' : 'ies'} older than {purged.months} months.</p>}
-      </Card>
+      </Card>}
     </div>
   )
 }

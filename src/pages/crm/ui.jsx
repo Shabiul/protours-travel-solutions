@@ -51,6 +51,35 @@ export function FollowUp({ date, status }) {
   return <span className={`inline-block rounded-md px-2 py-0.5 text-[0.72rem] font-bold ${cls}`}>{d < today ? 'Overdue ' : d === today ? 'Today ' : 'Follow up '}{dayLabel(d)}</span>
 }
 
+export const CASE_STATUS = {
+  docs_pending: ['Documents pending', 'bg-amber-100 text-amber-900'],
+  docs_received: ['Documents received', 'bg-sky-100 text-sky-900'],
+  in_progress: ['In progress', 'bg-sky-100 text-sky-900'],
+  submitted: ['Submitted', 'bg-violet-100 text-violet-900'],
+  approved: ['Approved', 'bg-emerald-100 text-emerald-900'],
+  delivered: ['Delivered', 'bg-emerald-200 text-emerald-900'],
+  rejected: ['Rejected', 'bg-red-100 text-red-800'],
+  cancelled: ['Cancelled', 'bg-slate-200 text-slate-700'],
+}
+export const PAY_MODE_LIST = [['cash', 'Cash'], ['upi', 'UPI'], ['bank', 'Bank transfer'], ['card', 'Card machine'], ['cheque', 'Cheque'], ['other', 'Other']]
+
+/** Ready-to-send WhatsApp messages for an order. The customer's phone and the text are filled in; staff just press send. */
+export function caseMessages(c) {
+  const NL = '\n'
+  const name = String(c.customer_name || '').split(' ')[0] || 'there'
+  const what = c.title || SERVICE_NAME[c.service] || 'your booking'
+  const missing = (c.checklist || []).filter((x) => !x.done).map((x) => `- ${x.item}`).join(NL)
+  const due = Math.max(0, Number(c.amount_inr || 0) - Number(c.paid_inr || 0))
+  const sign = `${NL}${NL}Pro Tours & Travel Solutions, Bengaluru`
+  return [
+    ['Documents needed', `Hi ${name}, for ${what} we still need these from you:${NL}${missing || '(nothing, we have everything)'}${NL}Please send them on this WhatsApp number.${sign}`],
+    ['Documents received', `Hi ${name}, we have received your documents for ${what}. We will start the process and keep you updated.${sign}`],
+    ['Application submitted', `Hi ${name}, your application for ${what} has been submitted (ref ${c.case_ref}). We will tell you as soon as there is an update.${sign}`],
+    ['Approved / ready', `Hi ${name}, good news: ${what} is approved and ready. ${due > 0 ? `The balance of Rs ${due.toLocaleString('en-IN')} is due.` : 'Everything is paid, thank you.'}${sign}`],
+    ['Payment reminder', `Hi ${name}, a gentle reminder: Rs ${due.toLocaleString('en-IN')} is pending for ${what} (ref ${c.case_ref}). You can pay by UPI or bank transfer, or at our office.${sign}`],
+  ]
+}
+
 export const ENQUIRY_STATUS = {
   new: ['New', 'bg-sky-100 text-sky-900'],
   contacted: ['Contacted', 'bg-amber-100 text-amber-900'],
@@ -126,6 +155,9 @@ export function Timeline({ events }) {
       case 'payment': return `Payment ${d.paymentId || ''}: ${d.status}${d.method ? ' by ' + String(d.method).toUpperCase() : ''}${d.vpa ? ' (' + d.vpa + ')' : ''}${d.amount ? ', ' + inr(d.amount) : ''}${d.error ? ': ' + d.error : ''}`
       case 'refund': return `Refunded ${inr(d.amount)} to the customer's card${d.reason ? ': ' + d.reason : ''}${d.status && d.status !== 'processed' ? ` (${d.status})` : ''}`
       case 'details': return 'Details changed: ' + Object.entries(d).map(([k, v]) => `${k.replace(/_/g, ' ')} ${v?.[0] ?? '—'} → ${v?.[1] || '—'}`).join('; ')
+      case 'payment_in': return `Payment received: ${inr(d.amount)} by ${String(d.mode || '').toUpperCase()}${d.ref ? ' (' + d.ref + ')' : ''}`
+      case 'checklist': return `Checklist: ${d.done} of ${d.total} done`
+      case 'invoice': return `Invoice ${d.invoice_no} created${d.total ? ' for ' + inr(d.total) : ''}`
       case 'status': return `Status changed: ${d.from} → ${d.to}`
       case 'assigned': return d.to ? `Assigned to ${d.to}` : 'Unassigned'
       case 'note': return d.text

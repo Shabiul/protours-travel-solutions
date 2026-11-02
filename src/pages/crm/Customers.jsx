@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Loader2, Mail, MessageCircle, Phone, RefreshCw, Search } from 'lucide-react'
 
 import { crm } from './api.js'
-import { BOOKING_STATUS, Card, Drawer, ENQUIRY_STATUS, Empty, Err, Pager, Pill, ServiceTag, ago, btnLight, dayLabel, inr, input, mailTo, waTo } from './ui.jsx'
+import { BOOKING_STATUS, CASE_STATUS, Card, Drawer, ENQUIRY_STATUS, Empty, Err, Pager, Pill, ServiceTag, ago, btnLight, dayLabel, inr, input, mailTo, waTo } from './ui.jsx'
 
 /** The key a customer is filed under: the last 10 digits of the phone, or the e-mail when there is no phone. */
 const keyOf = (c) => {
@@ -11,7 +11,7 @@ const keyOf = (c) => {
 }
 
 /** Everyone we have dealt with: flight customers and enquirers in one list, matched by phone or e-mail. */
-export default function Customers({ onOpenBooking, onOpenEnquiry }) {
+export default function Customers({ onOpenBooking, onOpenEnquiry, onOpenOrder }) {
   const [q, setQ] = useState('')
   const [dq, setDq] = useState('')
   const [page, setPage] = useState(1)
@@ -46,12 +46,15 @@ export default function Customers({ onOpenBooking, onOpenEnquiry }) {
         </ul>
       )}
       {data && <Pager page={data.page} size={data.size} total={data.total} onPage={setPage} />}
-      {open && <CustomerDrawer c={open} onClose={() => setOpen(null)} onBooking={(id) => { setOpen(null); onOpenBooking(id) }} onEnquiry={(id) => { setOpen(null); onOpenEnquiry(id) }} />}
+      {open && <CustomerDrawer c={open} onClose={() => setOpen(null)} onBooking={(id) => { setOpen(null); onOpenBooking(id) }} onEnquiry={(id) => { setOpen(null); onOpenEnquiry(id) }} onOrder={(id) => { setOpen(null); onOpenOrder(id) }} onLinked={() => { setOpen(null); load() }} />}
     </div>
   )
 }
 
-function CustomerDrawer({ c, onClose, onBooking, onEnquiry }) {
+function CustomerDrawer({ c, onClose, onBooking, onEnquiry, onOrder, onLinked }) {
+  const [other, setOther] = useState('')
+  const [linkErr, setLinkErr] = useState('')
+  const link = async (e) => { e.preventDefault(); setLinkErr(''); try { await crm('customerLink', { a: keyOf(c), b: other }, 'POST'); onLinked() } catch (x) { setLinkErr(x.message) } }
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
   useEffect(() => { crm('customer', { key: keyOf(c) }).then(setD).catch((e) => setErr(e.message)) }, [c])
@@ -72,11 +75,19 @@ function CustomerDrawer({ c, onClose, onBooking, onEnquiry }) {
             <Card title={`Flight bookings (${d.bookings.length})`}>
               {!d.bookings.length ? <p className="text-[0.9rem] text-slate-500">None.</p> : <ul className="grid gap-1">{d.bookings.map((b) => <li key={b.id}><button className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-sand" onClick={() => onBooking(b.id)}><span><span className="font-mono text-[0.8rem]">{b.order_ref}</span> <span className="text-[0.85rem] text-slate-600">{b.route} · {dayLabel(b.travel_date)} · {inr(b.amount_inr)}</span></span><Pill status={b.status} map={BOOKING_STATUS} /></button></li>)}</ul>}
             </Card>
+            <Card title={`Orders (${(d.orders || []).length})`}>
+              {!(d.orders || []).length ? <p className="text-[0.9rem] text-slate-500">None.</p> : <ul className="grid gap-1">{d.orders.map((o) => <li key={o.id}><button className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-sand" onClick={() => onOrder(o.id)}><span className="min-w-0"><ServiceTag service={o.service} /> <span className="font-mono text-[0.78rem]">{o.case_ref}</span> <span className="text-[0.85rem] text-slate-600">{o.title || ''} · {inr(o.paid_inr)} of {inr(o.amount_inr)}</span></span><Pill status={o.status} map={CASE_STATUS} /></button></li>)}</ul>}
+            </Card>
             <Card title={`Enquiries (${d.enquiries.length})`}>
               {!d.enquiries.length ? <p className="text-[0.9rem] text-slate-500">None.</p> : <ul className="grid gap-1">{d.enquiries.map((e) => <li key={e.id}><button className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-sand" onClick={() => onEnquiry(e.id)}><span className="min-w-0"><ServiceTag service={e.service} /> <span className="text-[0.85rem] text-slate-600">{e.topic || ''}{e.final_inr ? ` · ${inr(e.final_inr)}` : e.quoted_inr ? ` · quoted ${inr(e.quoted_inr)}` : ''} · {ago(e.created_at)}</span></span><Pill status={e.status} map={ENQUIRY_STATUS} /></button></li>)}</ul>}
             </Card>
           </>
         )}
+        <Card title="Same person under another number or e-mail?">
+          <form onSubmit={link} className="grid gap-2 sm:grid-cols-[1fr_auto]"><input aria-label="Other phone or e-mail" className={input} required placeholder="Their other phone (10 digits) or e-mail" value={other} onChange={(e) => setOther(e.target.value)} /><button className={btnLight}>Merge them</button></form>
+          <Err>{linkErr}</Err>
+          <p className="mt-2 text-[0.78rem] text-slate-500">Records are matched by phone number, and by e-mail when it appeared together with that phone. Use this when the two never appear together.{d?.linked?.length > 1 ? ` Already linked: ${d.linked.join(', ')}.` : ''}</p>
+        </Card>
       </div>
     </Drawer>
   )

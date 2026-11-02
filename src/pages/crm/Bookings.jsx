@@ -5,10 +5,11 @@ import { crm, download } from './api.js'
 import { BOOKING_STATUS, Card, Drawer, Empty, Err, Pager, Pill, Timeline, btnDark, btnLight, dayLabel, inr, input, mailTo, waTo, when, whenFull } from './ui.jsx'
 import { Json } from './Logs.jsx'
 import { PaymentTable } from './Payments.jsx'
+import { InvoiceForm } from './Invoices.jsx'
 
 const STATUSES = Object.keys(BOOKING_STATUS)
 
-export default function Bookings({ openId, onOpen }) {
+export default function Bookings({ openId, onOpen, admin }) {
   const [f, setF] = useState({ q: '', status: '', from: '', to: '' })
   const [debounced, setDebounced] = useState(f)
   const [page, setPage] = useState(1)
@@ -58,7 +59,7 @@ export default function Bookings({ openId, onOpen }) {
         </div>
       )}
       {data && <Pager page={data.page} size={data.size} total={data.total} onPage={setPage} />}
-      {openId && <BookingDrawer id={openId} onClose={() => onOpen(null)} onChanged={load} />}
+      {openId && <BookingDrawer id={openId} onClose={() => onOpen(null)} onChanged={load} admin={admin} />}
     </div>
   )
 }
@@ -97,7 +98,8 @@ function RefundPanel({ b, onDone }) {
   )
 }
 
-export function BookingDrawer({ id, onClose, onChanged }) {
+export function BookingDrawer({ id, onClose, onChanged, admin }) {
+  const [invoice, setInvoice] = useState(null)
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
   const [status, setStatus] = useState('')
@@ -159,7 +161,8 @@ export function BookingDrawer({ id, onClose, onChanged }) {
 
           <Card title="Payment attempts" right={<span className="text-[0.78rem] text-slate-500">Started {whenFull(b.created_at)}</span>}><PaymentTable rows={d.payments} /></Card>
 
-          <RefundPanel b={b} onDone={async () => { await load(); onChanged?.() }} />
+          {admin && <RefundPanel b={b} onDone={async () => { await load(); onChanged?.() }} />}
+          {b.status === 'ticketed' && <button type="button" className={btnLight} onClick={() => setInvoice({ booking_id: b.id, customer_name: b.customer_name, phone: b.contact_phone, email: b.contact_email, lines: [{ desc: `Air ticket ${b.route || ''}${b.pnr ? ' (PNR ' + b.pnr + ')' : ''}, ${b.pax_count || 1} traveller(s)`, qty: 1, rate: b.amount_inr || '' }] })}>Create an invoice for this booking</button>}
 
           <Card title="Update">
             <form onSubmit={save} className="grid gap-3">
@@ -183,6 +186,7 @@ export function BookingDrawer({ id, onClose, onChanged }) {
         </div>
       )}
       {view && <Drawer title={view.title} onClose={() => setView(null)}><Json data={view.data} /></Drawer>}
+      {invoice && <InvoiceForm seed={invoice} onClose={() => setInvoice(null)} onSaved={() => { setInvoice(null); load() }} />}
     </Drawer>
   )
 }

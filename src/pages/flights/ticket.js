@@ -106,7 +106,7 @@ export function drawTickets(doc, { orderRef, amount, tickets, logo, issuedOn = n
 }
 
 /** The logo, shrunk to what an A4 letterhead needs (about 66 mm wide: 540 px is plenty) and saved as a JPEG: a few KB instead of ~900 KB. */
-async function logoDataUrl() {
+export async function logoDataUrl() {
   try {
     const blob = await (await fetch('/logo.png')).blob()
     const bmp = await createImageBitmap(blob)

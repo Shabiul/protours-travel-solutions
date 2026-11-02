@@ -78,7 +78,9 @@ export async function requireStaff(req) {
   if (!email || !list.includes(email)) throw new AuthError('This account does not have access to the CRM.', 403)
   // Customers can now sign up on the same project: an allow-listed address must also be a CONFIRMED account.
   if (!(await emailConfirmed(claims.sub))) throw new AuthError('This account does not have access to the CRM.', 403)
-  return { email, sub: claims.sub }
+  // Staff can do everything except the money and settings actions, which need an ADMIN. If CRM_ADMIN_EMAILS is empty every staff member is an admin.
+  const admins = String(process.env.CRM_ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean)
+  return { email, sub: claims.sub, role: !admins.length || admins.includes(email) ? 'admin' : 'staff' }
 }
 
 /** Password sign-in through Supabase Auth (server side, so the keys stay on the server). */

@@ -166,6 +166,17 @@ Staff set what is added to the airline's fare, separately for **domestic** and *
 5. Tables, functions and sequences are closed to the public key (row-level security plus revoked privileges); if you add
    tables later, enable row-level security on them and revoke `anon` / `authenticated` the same way.
 
+### Orders, invoices, alerts and staff roles
+
+- **Orders** (tab *Orders*): one file per non-flight job (visa, passport, Umrah/Hajj, hotel, tour, insurance, corporate). Each has a status, due and travel date, travellers, a document checklist (pre-filled per service), money received (cash/UPI/bank/card with a reference) and a timeline. Turn any enquiry into an order with one click.
+- **WhatsApp templates**: inside an order, five ready messages (documents needed, received, submitted, approved, payment reminder) open WhatsApp with the text filled in. Nothing is sent automatically; sending e-mail/WhatsApp by itself needs a provider account (e.g. WhatsApp Business API, SMTP) and is not built.
+- **Invoices** (tab *Invoices*): numbered `PT/<financial year>/0001`, GST 0/5/12/18/28 %, totals computed by the database, PDF download, cancel (admin only, reason required, number is never reused). Business name/GSTIN/PAN/address are set in *Settings > Business details*. Have your accountant confirm how GST applies to your service fees.
+- **Alerts**: red counts on the tabs (new enquiries, follow-ups due, bookings needing attention, orders waiting for documents or due) and in the browser tab title; refreshed every 3 minutes.
+- **Staff roles**: set `CRM_ADMIN_EMAILS` (comma separated) to the owners. Everyone else in `CRM_ALLOWED_EMAILS` is *staff*: no refunds, price markup, exports, privacy clean-up, invoice cancelling or business details. Leave it empty and everyone is admin. Enforced on the server, not just hidden.
+- **Merging customers**: in *Customers*, open a person and use "Same person under another number or e-mail?".
+
+After pulling this update, run `supabase/schema.sql` again in the Supabase SQL editor (safe to repeat).
+
 ## Customer accounts: sign up, sign in, My trips: `/account`
 
 Customers can book as guests or create an account (Supabase Auth, called from `api/account.js`; the browser never talks to Supabase).

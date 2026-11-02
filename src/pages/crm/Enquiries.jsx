@@ -6,7 +6,7 @@ import { Card, Drawer, ENQUIRY_STATUS, Empty, Err, FollowUp, Pager, Pill, SERVIC
 
 const STATUSES = Object.keys(ENQUIRY_STATUS)
 
-export default function Enquiries({ openId, onOpen }) {
+export default function Enquiries({ openId, onOpen, onMakeOrder }) {
   const [f, setF] = useState({ q: '', status: '', service: '', due: '', from: '', to: '' })
   const [adding, setAdding] = useState(false)
   useEffect(() => { if (window.__crmDue) { const due = window.__crmDue; window.__crmDue = null; setF((x) => ({ ...x, due })) } }, [])
@@ -63,13 +63,13 @@ export default function Enquiries({ openId, onOpen }) {
         </ul>
       )}
       {data && <Pager page={data.page} size={data.size} total={data.total} onPage={setPage} />}
-      {openId && <EnquiryDrawer id={openId} onClose={() => onOpen(null)} onChanged={load} />}
+      {openId && <EnquiryDrawer id={openId} onClose={() => onOpen(null)} onChanged={load} onMakeOrder={onMakeOrder} />}
       {adding && <AddLead onClose={() => setAdding(false)} onSaved={(id) => { setAdding(false); load(); onOpen(id) }} />}
     </div>
   )
 }
 
-function EnquiryDrawer({ id, onClose, onChanged }) {
+function EnquiryDrawer({ id, onClose, onChanged, onMakeOrder }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
   const [status, setStatus] = useState('')
@@ -101,6 +101,7 @@ function EnquiryDrawer({ id, onClose, onChanged }) {
             </div>
           </Card>
           <Card title={q.topic || 'Message'}><p className="text-[0.95rem] whitespace-pre-line text-ink">{q.message || 'No message.'}</p></Card>
+          {q.status !== 'lost' && onMakeOrder && <button type="button" className={btnDark} onClick={() => onMakeOrder({ enquiry_id: q.id, service: q.service, customer_name: q.name, phone: q.phone, email: q.email, title: q.topic, amount_inr: q.final_inr ?? q.quoted_inr ?? '', notes: q.message })}>Turn this into an order</button>}
           <LeadDetails q={q} onSaved={async () => { await load(); onChanged?.() }} />
           <Card title="Update">
             <form onSubmit={save} className="grid gap-3">
