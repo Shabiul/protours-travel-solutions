@@ -33,6 +33,24 @@ export const PAYMENT_STATUS = {
   partially_refunded: ['Part refunded', 'bg-violet-100 text-violet-900'],
   refunded: ['Refunded', 'bg-violet-100 text-violet-900'],
 }
+/** Every service the business handles. Same keys as api/crm.js. */
+export const SERVICE_LIST = [
+  ['flights', 'Flight Booking'], ['hotels', 'Hotel Booking'], ['tailor', 'Tailor-Made Packages'], ['tours', 'Tour Packages'], ['visa', 'Visa Consultancy'],
+  ['passport', 'Passport Assistance'], ['umrah', 'Umrah & Hajj'], ['corporate', 'Corporate Travel'], ['insurance', 'Travel Insurance'], ['other', 'Other'],
+]
+export const SERVICE_NAME = Object.fromEntries(SERVICE_LIST)
+export const SOURCE_LIST = [['website', 'Website'], ['phone', 'Phone call'], ['walk-in', 'Walk-in'], ['whatsapp', 'WhatsApp'], ['referral', 'Referral'], ['email', 'E-mail'], ['social', 'Social media'], ['other', 'Other']]
+export const SOURCE_NAME = Object.fromEntries(SOURCE_LIST)
+export const ServiceTag = ({ service }) => <span className="inline-block rounded-md bg-navy-950/8 px-2 py-0.5 text-[0.72rem] font-bold text-navy-900">{SERVICE_NAME[service] || 'Other'}</span>
+
+/** Follow-up date as a badge: overdue (red), today (amber), later (grey). */
+export function FollowUp({ date, status }) {
+  if (!date || ['won', 'lost'].includes(status)) return null
+  const d = String(date).slice(0, 10), today = new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10)
+  const cls = d < today ? 'bg-red-100 text-red-800' : d === today ? 'bg-amber-100 text-amber-900' : 'bg-slate-100 text-slate-700'
+  return <span className={`inline-block rounded-md px-2 py-0.5 text-[0.72rem] font-bold ${cls}`}>{d < today ? 'Overdue ' : d === today ? 'Today ' : 'Follow up '}{dayLabel(d)}</span>
+}
+
 export const ENQUIRY_STATUS = {
   new: ['New', 'bg-sky-100 text-sky-900'],
   contacted: ['Contacted', 'bg-amber-100 text-amber-900'],
@@ -53,7 +71,7 @@ export const btnLight = `${btn} border border-slate-300 bg-white text-ink hover:
 
 export function Card({ title, right, children, className = '' }) {
   return (
-    <section className={`rounded-2xl border border-slate-200 bg-white shadow-sm ${className}`}>
+    <section className={`min-w-0 rounded-2xl border border-slate-200 bg-white shadow-sm ${className}`}>
       {(title || right) && <header className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3"><h2 className="font-display text-[1rem] font-bold text-ink">{title}</h2>{right}</header>}
       <div className="p-4">{children}</div>
     </section>
@@ -107,6 +125,7 @@ export function Timeline({ events }) {
       case 'failed': return `Ticketing problem${d.pnr ? ' (PNR ' + d.pnr + ')' : ''}: ${(d.errors || []).join('; ') || d.status || ''}`
       case 'payment': return `Payment ${d.paymentId || ''}: ${d.status}${d.method ? ' by ' + String(d.method).toUpperCase() : ''}${d.vpa ? ' (' + d.vpa + ')' : ''}${d.amount ? ', ' + inr(d.amount) : ''}${d.error ? ': ' + d.error : ''}`
       case 'refund': return `Refunded ${inr(d.amount)} to the customer's card${d.reason ? ': ' + d.reason : ''}${d.status && d.status !== 'processed' ? ` (${d.status})` : ''}`
+      case 'details': return 'Details changed: ' + Object.entries(d).map(([k, v]) => `${k.replace(/_/g, ' ')} ${v?.[0] ?? '—'} → ${v?.[1] || '—'}`).join('; ')
       case 'status': return `Status changed: ${d.from} → ${d.to}`
       case 'assigned': return d.to ? `Assigned to ${d.to}` : 'Unassigned'
       case 'note': return d.text

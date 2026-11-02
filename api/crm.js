@@ -17,6 +17,9 @@ import { getMarkup, saveMarkup, LIMITS } from './_lib/markup.js'
  */
 const BOOKING_STATUS = ['payment_pending', 'paid', 'ticketed', 'needs_attention', 'failed', 'cancelled', 'refunded']
 const ENQUIRY_STATUS = ['new', 'contacted', 'quoted', 'won', 'lost']
+// every service the business handles (the website's services plus corporate travel and insurance); flights bookings are tracked as bookings
+const SERVICES = ['flights', 'hotels', 'tailor', 'tours', 'visa', 'passport', 'umrah', 'corporate', 'insurance', 'other']
+const SOURCES = ['website', 'phone', 'walk-in', 'whatsapp', 'referral', 'email', 'social', 'other']
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 const TRACE = /^[A-Za-z0-9-]{1,64}$/
 const istDay = (t) => new Date(new Date(t).getTime() + 5.5 * 3600_000).toISOString().slice(0, 10)
@@ -65,6 +68,12 @@ function filters(q, kind) {
   if (s) {
     const cols = kind === 'booking' ? ['order_ref', 'pnr', 'booking_ids', 'contact_phone', 'contact_email', 'customer_name', 'route'] : ['name', 'phone', 'email', 'message', 'topic']
     f.push(`or=(${cols.map((c) => `${c}.ilike.*${encodeURIComponent(s)}*`).join(',')})`)
+  }
+  if (kind === 'enquiry') {
+    if (SERVICES.includes(q.service)) f.push(`service=eq.${q.service}`)
+    if (q.due === 'today') f.push(`follow_up_at=eq.${istDay(Date.now())}`)
+    if (q.due === 'overdue') f.push(`follow_up_at=lt.${istDay(Date.now())}`, 'status=in.(new,contacted,quoted)')
+    if (q.due === 'any') f.push('follow_up_at=not.is.null', 'status=in.(new,contacted,quoted)')
   }
   if (DATE.test(q.from || '')) f.push(`created_at=gte.${q.from}T00:00:00%2B05:30`)
   if (DATE.test(q.to || '')) f.push(`created_at=lte.${q.to}T23:59:59%2B05:30`)
@@ -141,6 +150,54 @@ async function enquiry(q) {
   const [row, ev] = await Promise.all([db(`enquiries?id=eq.${id}&select=*`), db(`crm_events?entity=eq.enquiry&entity_id=eq.${id}&order=created_at.asc&limit=200`)])
   if (!row.rows?.[0]) throw bad('Enquiry not found', 404)
   return { enquiry: row.rows[0], events: ev.rows || [] }
+}
+
+/** A lead staff typed in (phone call, walk-in, WhatsApp, referral). */
+async function enquiryCreate(_q, body, _req, staff) {
+  const name = clean(body.name, 80), phone = String(body.phone || '').replace(/[^\d+ ()-]/g, '').trim().slice(0, 20)
+  if (name.length < 2) throw bad('Enter the customer\'s name.')
+  if (phone.replace(/\D/g, '').length < 8) throw bad('Enter a phone number.')
+  const email = String(body.email || '').trim().toLowerCase().slice(0, 120)
+  if (email && !/^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/.test(email)) throw bad('That e-mail address does not look right.')
+  const service = SERVICES.includes(body.service) ? body.service : null
+  const source = SOURCES.includes(body.source) ? body.source : 'phone'
+  const follow = DATE.test(body.follow_up_at || '') ? body.follow_up_at : ''
+  const quoted = body.quoted_inr === '' || body.quoted_inr == null ? '' : Number(body.quoted_inr)
+  if (quoted !== '' && (!Number.isFinite(quoted) || quoted < 0 || quoted > 1e8)) throw bad('The quoted amount does not look right.')
+  const id = await rpc('crm_staff_add_enquiry', { p: { name, phone, email, topic: clean(body.topic, 80) || (SERVICES.includes(body.service) ? body.service : ''), service, source, message: String(body.message || '').slice(0, 2000), follow_up_at: follow, quoted_inr: quoted }, p_actor: staff.email })
+  audit(staff.email, 'enquiry.create', { id, service, source })
+  return { ok: true, id }
+}
+
+/** Service, source, follow-up date and the money on a lead. */
+async function enquiryFields(_q, body, _req, staff) {
+  const id = Number(body.id)
+  if (!Number.isInteger(id) || id <= 0) throw bad('Bad enquiry id')
+  const p = {}
+  if ('service' in body) { if (body.service && !SERVICES.includes(body.service)) throw bad('Unknown service.'); p.service = body.service || '' }
+  if ('source' in body) { if (!SOURCES.includes(body.source)) throw bad('Unknown source.'); p.source = body.source }
+  if ('follow_up_at' in body) { if (body.follow_up_at && !DATE.test(body.follow_up_at)) throw bad('That follow-up date does not look right.'); p.follow_up_at = body.follow_up_at || '' }
+  for (const k of ['quoted_inr', 'final_inr']) if (k in body) {
+    const v = body[k] === '' || body[k] == null ? '' : Number(body[k])
+    if (v !== '' && (!Number.isFinite(v) || v < 0 || v > 1e8)) throw bad('That amount does not look right.')
+    p[k] = v
+  }
+  const out = await rpc('crm_enquiry_fields', { p_id: id, p, p_actor: staff.email })
+  if (!out?.found) throw bad('Not found', 404)
+  audit(staff.email, 'enquiry.fields', { id, fields: Object.keys(p) })
+  return { ok: true, changed: out.changed }
+}
+
+/** Customers: bookings and enquiries together, searchable; one customer's full history. */
+async function customers(q) {
+  const size = Math.min(100, Math.max(1, Number(q.size) || 25)), pg = Math.max(1, Number(q.page) || 1)
+  const out = await rpc('crm_customers', { p_q: clean(q.q), p_limit: size, p_offset: (pg - 1) * size })
+  return { rows: out?.rows || [], total: out?.total || 0, page: pg, size }
+}
+async function customer(q) {
+  const key = String(q.key || '').trim()
+  if (!/^\d{10}$/.test(key) && !/^[^\s@]{1,64}@[^\s@]+$/.test(key)) throw bad('Bad customer')
+  return rpc('crm_customer', { p_key: key })
 }
 
 /** Status / assignee / note for a booking or an enquiry: the change and its timeline entries in one transaction. */
@@ -281,7 +338,7 @@ async function exportCsv(q, _b, _r, staff) {
 const PUBLIC = { login, refresh: (_q, body) => refresh(String(body.refreshToken || '')) }
 const READ = {
   me: (_q, _b, _r, staff) => ({ email: staff.email, env: isLive() ? 'live' : 'staging' }),
-  overview, bookings, booking, payments, enquiries, enquiry, traces, trace, balance, live, markup, export: exportCsv,
+  overview, bookings, booking, payments, customers, customer, enquiries, enquiry, traces, trace, balance, live, markup, export: exportCsv,
 }
 const WRITE = {
   bookingUpdate: (_q, b, _r, s) => update('booking', BOOKING_STATUS, b, s),
@@ -289,6 +346,8 @@ const WRITE = {
   purge,
   refund,
   markupSave,
+  enquiryCreate,
+  enquiryFields,
 }
 
 const SAFE_ERRORS = new Set(['DbError', 'AuthError', 'TboError', 'PayError'])

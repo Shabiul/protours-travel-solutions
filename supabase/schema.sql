@@ -87,6 +87,14 @@ create table if not exists enquiries (
   assigned_to text,
   notes       text
 );
+-- Which service the enquiry is for, where it came from, when to follow up, and the money: what we quoted, what it finally came to.
+alter table enquiries add column if not exists service text;
+alter table enquiries add column if not exists source text not null default 'website';
+alter table enquiries add column if not exists follow_up_at date;
+alter table enquiries add column if not exists quoted_inr numeric(12,2);
+alter table enquiries add column if not exists final_inr numeric(12,2);
+create index if not exists enquiries_service on enquiries (service, created_at desc);
+create index if not exists enquiries_followup on enquiries (follow_up_at) where follow_up_at is not null;
 create index if not exists enquiries_status on enquiries (status, created_at desc);
 create index if not exists enquiries_created on enquiries (created_at desc);
 create index if not exists enquiries_phone on enquiries (phone);
@@ -250,12 +258,122 @@ declare v_id bigint;
 begin
   if (select count(*) from enquiries where created_at > now() - interval '10 minutes') >= 150 then return -1; end if;
   if exists (select 1 from enquiries where phone = p->>'phone' and created_at > now() - interval '10 minutes') then return 0; end if;
-  insert into enquiries (name, phone, email, topic, message, page, consent)
-  values (p->>'name', p->>'phone', nullif(p->>'email', ''), nullif(p->>'topic', ''), nullif(p->>'message', ''), nullif(p->>'page', ''), true)
+  insert into enquiries (name, phone, email, topic, message, page, consent, service)
+  values (p->>'name', p->>'phone', nullif(p->>'email', ''), nullif(p->>'topic', ''), nullif(p->>'message', ''), nullif(p->>'page', ''), true, crm_service_of(p->>'topic'))
   returning id into v_id;
   insert into crm_events (entity, entity_id, kind, actor, data) values ('enquiry', v_id, 'created', 'customer', jsonb_build_object('page', p->>'page', 'topic', p->>'topic'));
   return v_id;
 end $$;
+
+
+-- The service an enquiry is about, from the free-text topic the website form sends ("Visa Services", "Umrah & Hajj"...).
+create or replace function crm_service_of(t text) returns text language sql immutable set search_path = public, pg_temp as $$
+  select case
+    when t ~* 'tailor|custom' then 'tailor'
+    when t ~* 'umrah|hajj|\mhaj\M' then 'umrah'
+    when t ~* 'visa' then 'visa'
+    when t ~* 'passport' then 'passport'
+    when t ~* 'insurance' then 'insurance'
+    when t ~* 'corporate|business travel' then 'corporate'
+    when t ~* 'flight|air ?ticket' then 'flights'
+    when t ~* 'hotel|resort|accommodation' then 'hotels'
+    when t ~* 'tour|package|holiday' then 'tours'
+    else 'other' end
+$$;
+
+-- Per-service picture for the dashboard, and the follow-ups that are due.
+create or replace function crm_services_summary() returns jsonb language sql stable set search_path = public, pg_temp as $$
+  with tz as (select (now() at time zone 'Asia/Kolkata')::date as today)
+  select jsonb_build_object(
+    'services', (select coalesce(jsonb_agg(x order by x.total desc), '[]'::jsonb) from (
+        select coalesce(service, 'other') as service, count(*) as total,
+               count(*) filter (where status = 'new') as "new",
+               count(*) filter (where status in ('new', 'contacted', 'quoted')) as open,
+               count(*) filter (where status = 'won') as won,
+               count(*) filter (where status = 'lost') as lost,
+               coalesce(sum(coalesce(final_inr, quoted_inr)) filter (where status = 'won'), 0) as won_value,
+               coalesce(sum(quoted_inr) filter (where status in ('contacted', 'quoted')), 0) as pipeline_value
+        from enquiries where created_at >= now() - interval '365 days' group by 1) x),
+    'followups', (select jsonb_build_object(
+        'today', count(*) filter (where follow_up_at = (select today from tz)),
+        'overdue', count(*) filter (where follow_up_at < (select today from tz)),
+        'next', coalesce(jsonb_agg(jsonb_build_object('id', id, 'name', name, 'service', service, 'follow_up_at', follow_up_at, 'phone', phone) order by follow_up_at) filter (where rn <= 8), '[]'::jsonb))
+      from (select e.*, row_number() over (order by follow_up_at) rn from enquiries e
+             where follow_up_at is not null and follow_up_at <= (select today from tz) + 3 and status in ('new', 'contacted', 'quoted')) f)
+  )
+$$;
+
+-- A lead entered by staff (phone call, walk-in, WhatsApp, referral). No duplicate / flood limits: a person is typing it.
+create or replace function crm_staff_add_enquiry(p jsonb, p_actor text) returns bigint language plpgsql set search_path = public, pg_temp as $$
+declare v_id bigint;
+begin
+  insert into enquiries (name, phone, email, topic, message, page, consent, service, source, follow_up_at, quoted_inr, status)
+  values (p->>'name', p->>'phone', nullif(p->>'email', ''), nullif(p->>'topic', ''), nullif(p->>'message', ''), 'staff', true,
+          coalesce(nullif(p->>'service', ''), crm_service_of(p->>'topic')), coalesce(nullif(p->>'source', ''), 'phone'),
+          nullif(p->>'follow_up_at', '')::date, nullif(p->>'quoted_inr', '')::numeric, 'new')
+  returning id into v_id;
+  insert into crm_events (entity, entity_id, kind, actor, data) values ('enquiry', v_id, 'created', p_actor, jsonb_build_object('page', 'staff', 'topic', p->>'topic', 'source', p->>'source'));
+  return v_id;
+end $$;
+
+-- Staff edit of the lead's details (service, source, follow-up date, quote, final amount); every change goes on the timeline.
+create or replace function crm_enquiry_fields(p_id bigint, p jsonb, p_actor text) returns jsonb language plpgsql set search_path = public, pg_temp as $$
+declare o enquiries%rowtype; ch jsonb := '{}'::jsonb;
+begin
+  select * into o from enquiries where id = p_id for update;
+  if not found then return jsonb_build_object('found', false); end if;
+  if p ? 'service' and nullif(p->>'service', '') is distinct from o.service then ch := ch || jsonb_build_object('service', jsonb_build_array(o.service, p->>'service')); end if;
+  if p ? 'source' and nullif(p->>'source', '') is distinct from o.source then ch := ch || jsonb_build_object('source', jsonb_build_array(o.source, p->>'source')); end if;
+  if p ? 'follow_up_at' and nullif(p->>'follow_up_at', '')::date is distinct from o.follow_up_at then ch := ch || jsonb_build_object('follow_up_at', jsonb_build_array(o.follow_up_at, nullif(p->>'follow_up_at', ''))); end if;
+  if p ? 'quoted_inr' and nullif(p->>'quoted_inr', '')::numeric is distinct from o.quoted_inr then ch := ch || jsonb_build_object('quoted_inr', jsonb_build_array(o.quoted_inr, nullif(p->>'quoted_inr', ''))); end if;
+  if p ? 'final_inr' and nullif(p->>'final_inr', '')::numeric is distinct from o.final_inr then ch := ch || jsonb_build_object('final_inr', jsonb_build_array(o.final_inr, nullif(p->>'final_inr', ''))); end if;
+  if ch <> '{}'::jsonb then
+    update enquiries set
+      service = case when p ? 'service' then nullif(p->>'service', '') else service end,
+      source = case when p ? 'source' and nullif(p->>'source', '') is not null then p->>'source' else source end,
+      follow_up_at = case when p ? 'follow_up_at' then nullif(p->>'follow_up_at', '')::date else follow_up_at end,
+      quoted_inr = case when p ? 'quoted_inr' then nullif(p->>'quoted_inr', '')::numeric else quoted_inr end,
+      final_inr = case when p ? 'final_inr' then nullif(p->>'final_inr', '')::numeric else final_inr end
+    where id = p_id;
+    insert into crm_events (entity, entity_id, kind, actor, data) values ('enquiry', p_id, 'details', p_actor, ch);
+  end if;
+  return jsonb_build_object('found', true, 'changed', ch <> '{}'::jsonb);
+end $$;
+
+-- Customer directory: bookings and enquiries joined on the phone number (last 10 digits) or, failing that, the e-mail.
+create or replace function crm_customers(p_q text, p_limit int, p_offset int) returns jsonb language sql stable set search_path = public, pg_temp as $$
+  with src as (
+    select 'booking' as kind, id, customer_name as name, contact_phone as phone, contact_email as email, created_at,
+           case when status = 'ticketed' then coalesce(amount_inr, 0) else 0 end as spent, 'flights' as service
+      from flight_bookings where status <> 'payment_pending' or created_at > now() - interval '2 days'
+    union all
+    select 'enquiry', id, name, phone, email, created_at, case when status = 'won' then coalesce(final_inr, quoted_inr, 0) else 0 end, coalesce(service, 'other') from enquiries
+  ), keyed as (
+    select *, coalesce(nullif(case when length(regexp_replace(coalesce(phone, ''), '\D', '', 'g')) >= 10 then right(regexp_replace(phone, '\D', '', 'g'), 10) end, ''), lower(nullif(email, ''))) as ck from src
+  ), grouped as (
+    select ck, (array_agg(name order by created_at desc) filter (where name is not null and name <> ''))[1] as name,
+           (array_agg(phone order by created_at desc) filter (where phone is not null and phone <> ''))[1] as phone,
+           (array_agg(email order by created_at desc) filter (where email is not null and email <> ''))[1] as email,
+           count(*) filter (where kind = 'booking') as bookings, count(*) filter (where kind = 'enquiry') as enquiries,
+           sum(spent) as spent, array_agg(distinct service) as services, max(created_at) as last_at, min(created_at) as first_at
+      from keyed where ck is not null group by ck
+  ), found as (
+    select * from grouped where coalesce(p_q, '') = '' or concat_ws(' ', name, phone, email) ilike '%' || p_q || '%'
+  )
+  select jsonb_build_object('total', (select count(*) from found),
+    'rows', coalesce((select jsonb_agg(to_jsonb(r)) from (select * from found order by last_at desc limit least(greatest(p_limit, 1), 100) offset greatest(p_offset, 0)) r), '[]'::jsonb))
+$$;
+
+-- One customer's whole history.
+create or replace function crm_customer(p_key text) returns jsonb language sql stable set search_path = public, pg_temp as $$
+  select jsonb_build_object(
+    'bookings', coalesce((select jsonb_agg(to_jsonb(b) order by b.created_at desc) from (
+        select id, order_ref, status, amount_inr, route, travel_date, pnr, created_at, customer_name, contact_phone, contact_email from flight_bookings
+         where right(regexp_replace(coalesce(contact_phone, ''), '\D', '', 'g'), 10) = p_key or lower(contact_email) = lower(p_key)) b), '[]'::jsonb),
+    'enquiries', coalesce((select jsonb_agg(to_jsonb(e) order by e.created_at desc) from (
+        select id, name, phone, email, topic, service, status, quoted_inr, final_inr, follow_up_at, created_at from enquiries
+         where right(regexp_replace(coalesce(phone, ''), '\D', '', 'g'), 10) = p_key or lower(email) = lower(p_key)) e), '[]'::jsonb))
+$$;
 
 -- Dashboard: every number in one query, aggregated in the database (no rows shipped to the server).
 create or replace function crm_overview() returns jsonb language sql stable set search_path = public, pg_temp as $$
@@ -265,6 +383,7 @@ create or replace function crm_overview() returns jsonb language sql stable set 
   days as (select generate_series((select today from tz) - 13, (select today from tz), interval '1 day')::date as day)
   select jsonb_build_object(
     'today', (select today from tz),
+    'serviceSummary', crm_services_summary(),
     'bookings', (select jsonb_build_object(
         'ticketed', count(*) filter (where status = 'ticketed'),
         'attention', count(*) filter (where status in ('needs_attention', 'failed')),
@@ -540,6 +659,9 @@ begin
   return jsonb_build_object('tboLogsDeleted', n_logs, 'enquiriesDeleted', n_enq);
 end $$;
 
+-- enquiries that arrived before the service column existed
+update enquiries set service = crm_service_of(topic) where service is null;
+
 -- ---- lock everything to the server's secret key (service_role) only ----
 revoke all on table tbo_logs, flight_bookings, enquiries, crm_events, site_content, payment_events, payments from anon, authenticated;
 revoke all on sequence tbo_logs_id_seq, flight_bookings_id_seq, enquiries_id_seq, crm_events_id_seq from anon, authenticated;
@@ -547,10 +669,12 @@ revoke all on function crm_record_checkout(jsonb), crm_record_paid(text, text), 
   crm_overview(), crm_booking_detail(bigint), crm_apply_update(text, bigint, text, text, boolean, text, text), crm_traces(int, int), crm_cleanup(int, int), set_updated_at(),
   acct_bookings(uuid, text), acct_booking(uuid, text, text),
   crm_claim_ticketing(text, text, numeric), crm_for_order(text), crm_outcome(text), crm_webhook_seen(text, text, text, text), crm_webhook_done(text, text),
-  crm_payment_note(text, text, jsonb), crm_mark_unfulfilled(text, text, numeric, text), crm_booking_for_refund(bigint), crm_record_refund(jsonb), crm_stale_pending(int), crm_get_setting(text), crm_set_setting(text, jsonb), crm_upsert_payment(jsonb), crm_booking_payments(text)
+  crm_payment_note(text, text, jsonb), crm_mark_unfulfilled(text, text, numeric, text), crm_booking_for_refund(bigint), crm_record_refund(jsonb), crm_stale_pending(int), crm_get_setting(text), crm_set_setting(text, jsonb), crm_upsert_payment(jsonb), crm_booking_payments(text),
+  crm_service_of(text), crm_services_summary(), crm_staff_add_enquiry(jsonb, text), crm_enquiry_fields(bigint, jsonb, text), crm_customers(text, int, int), crm_customer(text)
   from public, anon, authenticated;
 grant execute on function crm_record_checkout(jsonb), crm_record_paid(text, text), crm_record_payment_failed(text, text), crm_record_outcome(jsonb), crm_add_enquiry(jsonb),
   crm_overview(), crm_booking_detail(bigint), crm_apply_update(text, bigint, text, text, boolean, text, text), crm_traces(int, int), crm_cleanup(int, int),
   acct_bookings(uuid, text), acct_booking(uuid, text, text),
   crm_claim_ticketing(text, text, numeric), crm_for_order(text), crm_outcome(text), crm_webhook_seen(text, text, text, text), crm_webhook_done(text, text),
-  crm_payment_note(text, text, jsonb), crm_mark_unfulfilled(text, text, numeric, text), crm_booking_for_refund(bigint), crm_record_refund(jsonb), crm_stale_pending(int), crm_get_setting(text), crm_set_setting(text, jsonb), crm_upsert_payment(jsonb), crm_booking_payments(text) to service_role;
+  crm_payment_note(text, text, jsonb), crm_mark_unfulfilled(text, text, numeric, text), crm_booking_for_refund(bigint), crm_record_refund(jsonb), crm_stale_pending(int), crm_get_setting(text), crm_set_setting(text, jsonb), crm_upsert_payment(jsonb), crm_booking_payments(text),
+  crm_service_of(text), crm_services_summary(), crm_staff_add_enquiry(jsonb, text), crm_enquiry_fields(bigint, jsonb, text), crm_customers(text, int, int), crm_customer(text) to service_role;

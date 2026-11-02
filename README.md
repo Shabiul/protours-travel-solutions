@@ -117,6 +117,17 @@ The session lives in the browser tab only. Rotate the secret key if it is ever p
    search and filter, export a CSV, then Settings: wallet balance. Staging data is labelled "Test mode".
 6. Negative checks: open `/crm` signed out (login only), sign in with an account that is not on `CRM_ALLOWED_EMAILS` (refused).
 
+### Every service in the CRM
+
+The CRM tracks all the services the website sells, not just flights: Flight Booking (online bookings), Hotel Booking, Tailor-Made Packages, Tour Packages,
+Visa Consultancy, Passport Assistance, Umrah & Hajj, Corporate Travel, Travel Insurance (and Other).
+
+- **Enquiries** carry a *service* (worked out automatically from the website form's topic, or chosen by staff), a *source* (website, phone, walk-in, WhatsApp, referral...),
+  a *follow-up date*, the amount *quoted* and the *final amount* when won. Filter by service and by follow-up (overdue / due today). **Add lead** is for customers who call or walk in.
+- **Dashboard**: a Services table (new / open / won / lost, value won, value in the pipeline) and a Follow-ups card with what is overdue or due today.
+- **Customers** tab: one row per person across bookings and enquiries (joined by the last 10 digits of the phone, else the e-mail), with total spend and a full history.
+- Needs the latest `supabase/schema.sql` (new enquiry columns and functions; older enquiries are classified automatically).
+
 ### Price markup (CRM, Settings)
 
 Staff set what is added to the airline's fare, separately for **domestic** and **international** flights, as a **percentage**, a **flat rupee amount**, or both:

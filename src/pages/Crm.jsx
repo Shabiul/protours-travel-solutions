@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
-import { CreditCard, LayoutDashboard, Loader2, MessageSquareText, Plane, ScrollText, Settings as Cog } from 'lucide-react'
+import { CreditCard, Users, LayoutDashboard, Loader2, MessageSquareText, Plane, ScrollText, Settings as Cog } from 'lucide-react'
 
 import { getSession, onSession, signOut } from './crm/api.js'
 import Login from './crm/Login.jsx'
@@ -7,6 +7,7 @@ import Login from './crm/Login.jsx'
 const Dashboard = lazy(() => import('./crm/Dashboard.jsx'))
 const Bookings = lazy(() => import('./crm/Bookings.jsx'))
 const Enquiries = lazy(() => import('./crm/Enquiries.jsx'))
+const Customers = lazy(() => import('./crm/Customers.jsx'))
 const Payments = lazy(() => import('./crm/Payments.jsx'))
 const Logs = lazy(() => import('./crm/Logs.jsx'))
 const Settings = lazy(() => import('./crm/Settings.jsx'))
@@ -14,6 +15,7 @@ const Settings = lazy(() => import('./crm/Settings.jsx'))
 const TABS = [
   ['dashboard', 'Dashboard', LayoutDashboard],
   ['bookings', 'Bookings', Plane],
+  ['customers', 'Customers', Users],
   ['payments', 'Payments', CreditCard],
   ['enquiries', 'Enquiries', MessageSquareText],
   ['logs', 'TBO logs', ScrollText],
@@ -65,8 +67,9 @@ export default function Crm() {
               ))}
             </nav>
             <Suspense fallback={<Loader2 className="mx-auto mt-10 animate-spin" />}>
-              {tab === 'dashboard' && <Dashboard go={setTab} onOpenBooking={goBooking} onOpenEnquiry={goEnquiry} />}
+              {tab === 'dashboard' && <Dashboard go={setTab} onOpenBooking={goBooking} onOpenEnquiry={goEnquiry} onFollowUps={(due) => { setEnquiry(null); setTab('enquiries'); window.__crmDue = due }} />}
               {tab === 'bookings' && <Bookings openId={booking} onOpen={setBooking} />}
+              {tab === 'customers' && <Customers onOpenBooking={goBooking} onOpenEnquiry={goEnquiry} />}
               {tab === 'payments' && <Payments onOpenOrder={() => setTab('bookings')} />}
               {tab === 'enquiries' && <Enquiries openId={enquiry} onOpen={setEnquiry} />}
               {tab === 'logs' && <Logs onOpenBooking={goBooking} />}

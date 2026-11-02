@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle, CreditCard, Loader2, MessageSquareText, Plane, TrendingUp } from 'lucide-react'
 
 import { crm } from './api.js'
-import { BOOKING_STATUS, Card, ENQUIRY_STATUS, Err, Pill, ago, inr } from './ui.jsx'
+import { BOOKING_STATUS, Card, ENQUIRY_STATUS, Err, FollowUp, Pill, SERVICE_NAME, ServiceTag, ago, inr } from './ui.jsx'
 
 function Kpi({ icon: Icon, label, value, sub, tone = 'text-navy-950', onClick }) {
   const body = (
@@ -17,6 +17,34 @@ function Kpi({ icon: Icon, label, value, sub, tone = 'text-navy-950', onClick })
 }
 
 /** 14 days of ticketed bookings and enquiries. Drawn by hand: two series, labelled, no library. */
+/** Every service at a glance (last 12 months of enquiries) with the follow-ups that are due. */
+function Services({ s, flights, onOpenEnquiry, onFollowUps }) {
+  const rows = s.services || []
+  const f = s.followups || { today: 0, overdue: 0, next: [] }
+  return (
+    <div className="grid gap-5 lg:grid-cols-[1.7fr_1fr]">
+      <Card title="Services" right={<span className="text-[0.78rem] text-slate-500">Enquiries, last 12 months</span>}>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[34rem] text-left text-[0.88rem]">
+            <thead className="text-[0.72rem] tracking-wide text-slate-500 uppercase"><tr><th className="py-1">Service</th><th>New</th><th>Open</th><th>Won</th><th>Lost</th><th className="text-right">Won value</th><th className="text-right">In pipeline</th></tr></thead>
+            <tbody>
+              <tr className="border-t border-slate-100"><td className="py-2 font-semibold">Flight Booking <span className="text-[0.72rem] font-normal text-slate-500">(online bookings)</span></td><td>—</td><td>{flights.pending}</td><td>{flights.ticketed}</td><td>—</td><td className="text-right font-semibold">{inr(flights.revenue30)}</td><td className="text-right text-[0.75rem] text-slate-500">30 days, ticketed</td></tr>
+              {rows.map((r) => (
+                <tr key={r.service} className="border-t border-slate-100"><td className="py-2 font-semibold">{SERVICE_NAME[r.service] || 'Other'}</td><td>{r.new}</td><td>{r.open}</td><td>{r.won}</td><td>{r.lost}</td><td className="text-right font-semibold">{inr(r.won_value)}</td><td className="text-right text-slate-600">{inr(r.pipeline_value)}</td></tr>
+              ))}
+              {!rows.length && <tr><td colSpan="7" className="py-3 text-slate-500">No enquiries yet. They appear here by service as they arrive.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+      <Card title="Follow-ups" right={<button className="text-[0.85rem] font-bold text-brand-500" onClick={() => onFollowUps('any')}>Open</button>}>
+        <div className="mb-2 flex gap-4 text-[0.9rem]"><button className="text-left" onClick={() => onFollowUps('overdue')}><span className={`block font-display text-[1.5rem] font-bold ${f.overdue ? 'text-red-700' : 'text-navy-950'}`}>{f.overdue}</span>overdue</button><button className="text-left" onClick={() => onFollowUps('today')}><span className="block font-display text-[1.5rem] font-bold text-navy-950">{f.today}</span>due today</button></div>
+        {!f.next?.length ? <p className="text-[0.88rem] text-slate-500">Nothing due in the next 3 days. Set a follow-up date on a lead to be reminded here.</p> : <ul className="grid gap-1">{f.next.map((x) => <li key={x.id}><button className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-sand" onClick={() => onOpenEnquiry(x.id)}><span className="min-w-0 truncate"><span className="font-semibold">{x.name}</span> <ServiceTag service={x.service} /></span><FollowUp date={x.follow_up_at} status="new" /></button></li>)}</ul>}
+      </Card>
+    </div>
+  )
+}
+
 function Chart({ daily }) {
   const W = 720, H = 170, pad = 24
   const max = Math.max(1, ...daily.map((d) => Math.max(d.bookings, d.enquiries)))
@@ -40,7 +68,7 @@ function Chart({ daily }) {
   )
 }
 
-export default function Dashboard({ go, onOpenBooking, onOpenEnquiry }) {
+export default function Dashboard({ go, onOpenBooking, onOpenEnquiry, onFollowUps }) {
   const [o, setO] = useState(null)
   const [err, setErr] = useState('')
   useEffect(() => {
@@ -66,6 +94,7 @@ export default function Dashboard({ go, onOpenBooking, onOpenEnquiry }) {
         <Kpi icon={AlertTriangle} label="Needs attention" value={b.attention} tone={b.attention ? 'text-red-700' : 'text-navy-950'} sub="Paid but not ticketed, or failed" onClick={() => go('bookings')} />
         <Kpi icon={CreditCard} label="Awaiting payment" value={b.pending} sub={`${b.abandoned} older than 30 min (likely abandoned)`} onClick={() => go('bookings')} />
       </div>
+      {o.serviceSummary && <Services s={o.serviceSummary} flights={b} onOpenEnquiry={onOpenEnquiry} onFollowUps={onFollowUps} />}
       <div className="grid gap-5 lg:grid-cols-[1.7fr_1fr]">
         <Card title="Last 14 days" right={<span className="flex items-center gap-3 text-[0.78rem] text-slate-600"><span><i className="mr-1 inline-block h-2.5 w-2.5 rounded-sm bg-[#0f5e9e]" />Ticketed</span><span><i className="mr-1 inline-block h-2.5 w-2.5 rounded-sm bg-[#f5bc48]" />Enquiries</span></span>}><Chart daily={o.daily} /></Card>
         <Card title="Enquiry pipeline" right={<button className="text-[0.85rem] font-bold text-brand-500" onClick={() => go('enquiries')}>Open</button>}>
