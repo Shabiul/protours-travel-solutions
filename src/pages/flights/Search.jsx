@@ -28,7 +28,7 @@ function useOutside(ref, onClose) {
 function FieldCard({ caption, children, onClick, active, className = '', id }) {
   return (
     <button type="button" id={id} onClick={onClick} aria-expanded={!!active}
-      className={`block w-full rounded-2xl border bg-white p-3.5 text-left transition hover:border-brand-500 ${active ? 'border-brand-500 ring-2 ring-brand-500/20' : 'border-slate-300'} ${className}`}>
+      className={`flex h-full w-full flex-col items-stretch justify-start rounded-2xl border bg-white p-3.5 text-left transition hover:border-brand-500 ${active ? 'border-brand-500 ring-2 ring-brand-500/20' : 'border-slate-300'} ${className}`}>
       <span className="block text-[0.72rem] font-bold tracking-wide text-slate-500 uppercase">{caption}</span>
       {children}
     </button>
@@ -60,7 +60,7 @@ function AirportCard({ id, caption, value, onChange, compact }) {
     return AIRPORT_LIST.map((a, i) => [score(a), i, a]).filter((x) => x[0] < 9).sort((x, y) => x[0] - y[0] || x[1] - y[1]).slice(0, 8).map((x) => x[2])
   }, [text])
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative h-full" ref={ref}>
       <FieldCard id={id} caption={caption} active={open} onClick={() => setOpen((o) => !o)}>
         <span className={`mt-0.5 block truncate font-display font-bold text-ink ${compact ? 'text-[1.1rem]' : 'text-[1.5rem] leading-tight'}`}>{value ? cityOf(value) : 'Select city'}</span>
         <span className="block truncate text-[0.82rem] text-slate-500">{value ? `${value}, ${airportName(value)}` : 'City or airport'}</span>
@@ -113,7 +113,7 @@ export function useMonthFares(from, to, ym, enabled = true) {
 }
 
 function Calendar({ value, min, onPick, from, to }) {
-  const [ym, setYm] = useState((value || todayIso()).slice(0, 7))
+  const [ym, setYm] = useState((value || min || todayIso()).slice(0, 7))
   const fares = useMonthFares(from, to, ym)
   const [y, m] = ym.split('-').map(Number)
   const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay()
@@ -151,23 +151,33 @@ function Calendar({ value, min, onPick, from, to }) {
   )
 }
 
-function DateCard({ caption, value, min, onPick, from, to, empty, onEmpty, id }) {
+function DateCard({ caption, value, min, onPick, from, to, empty, onEmpty, id, placeholder = 'Select date', openSignal = 0 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
   useOutside(ref, () => setOpen(false))
+  useEffect(() => { if (openSignal) setOpen(true) }, [openSignal])
   if (empty) {
     return (
       <FieldCard id={id} caption={caption} className="bg-sand/60 text-slate-500" onClick={onEmpty}>
-        <span className="mt-0.5 block text-[1rem] font-semibold">Tap to add a return date</span>
-        <span className="block text-[0.82rem]">Book a round trip and save time</span>
+        <span className="mt-0.5 block text-[1.1rem] leading-tight font-semibold">Add return</span>
+        <span className="block text-[0.82rem]">Save with a round trip</span>
       </FieldCard>
     )
   }
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative h-full" ref={ref}>
       <FieldCard id={id} caption={caption} active={open} onClick={() => setOpen((o) => !o)}>
-        <span className="mt-0.5 flex items-baseline gap-1.5"><span className="font-display text-[1.5rem] leading-tight font-bold text-ink">{dayMonth(value)}</span><span className="text-[0.9rem] text-slate-500">{value.slice(0, 4)}</span></span>
-        <span className="flex items-center gap-1 text-[0.82rem] text-slate-500"><CalendarDays size={13} /> {new Date(`${value}T00:00:00Z`).toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'UTC' })}</span>
+        {value ? (
+          <>
+            <span className="mt-0.5 flex items-baseline gap-1.5"><span className="font-display text-[1.5rem] leading-tight font-bold text-ink">{dayMonth(value)}</span><span className="text-[0.9rem] text-slate-500">{value.slice(0, 4)}</span></span>
+            <span className="flex items-center gap-1 text-[0.82rem] text-slate-500"><CalendarDays size={13} /> {new Date(`${value}T00:00:00Z`).toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'UTC' })}</span>
+          </>
+        ) : (
+          <>
+            <span className="mt-0.5 block font-display text-[1.5rem] leading-tight font-bold text-ink">{placeholder}</span>
+            <span className="flex items-center gap-1 text-[0.82rem] text-slate-500"><CalendarDays size={13} /> Pick a date</span>
+          </>
+        )}
       </FieldCard>
       {open && (
         <div className="absolute right-0 z-30 mt-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl md:left-0 md:right-auto">
@@ -195,29 +205,32 @@ function Counter({ label, hint, value, min, max, onChange }) {
 
 function TravellersCard({ pax, setPax, cabin, setCabin }) {
   const [open, setOpen] = useState(false)
+  const [dPax, setDPax] = useState(pax)
+  const [dCabin, setDCabin] = useState(cabin)
   const ref = useRef(null)
   useOutside(ref, () => setOpen(false))
+  const toggle = () => { if (!open) { setDPax(pax); setDCabin(cabin) } setOpen((o) => !o) }
   const n = pax.adults + pax.children + pax.infants
-  const cabinLabel = CABINS.find(([v]) => v === cabin)?.[1]
   return (
     <div className="relative" ref={ref}>
-      <FieldCard id="travellers" caption="Travellers & class" active={open} onClick={() => setOpen((o) => !o)}>
-        <span className="mt-0.5 flex items-baseline gap-1.5"><span className="font-display text-[1.5rem] leading-tight font-bold text-ink">{n}</span><span className="text-[0.95rem] font-semibold text-ink">Traveller{n > 1 ? 's' : ''}</span></span>
-        <span className="block truncate text-[0.82rem] text-slate-500">{cabinLabel}</span>
-      </FieldCard>
+      <button type="button" id="travellers" onClick={toggle} aria-expanded={open} aria-label={`Travellers: ${n}`}
+        className={`flex flex-col rounded-xl border bg-white px-3.5 py-1.5 text-left transition hover:border-brand-500 ${open ? 'border-brand-500 ring-2 ring-brand-500/20' : 'border-slate-300'}`}>
+        <span className="text-[0.68rem] font-bold tracking-wide text-slate-500 uppercase">Travellers</span>
+        <span className="flex items-center gap-1.5 font-display text-[1.15rem] leading-tight font-bold text-ink"><Users size={17} className="text-slate-500" /> {n}</span>
+      </button>
       {open && (
         <div className="absolute right-0 z-30 mt-2 w-[min(22rem,92vw)] rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl">
-          <Counter label="Adults" hint="12 years and above" value={pax.adults} min={1} max={9 - pax.children} onChange={(v) => setPax((p) => ({ ...p, adults: v, infants: Math.min(p.infants, v) }))} />
-          <Counter label="Children" hint="2 – 11 years" value={pax.children} min={0} max={9 - pax.adults} onChange={(v) => setPax((p) => ({ ...p, children: v }))} />
-          <Counter label="Infants" hint="Under 2 years, on an adult's lap" value={pax.infants} min={0} max={pax.adults} onChange={(v) => setPax((p) => ({ ...p, infants: v }))} />
+          <Counter label="Adults" hint="12 years and above" value={dPax.adults} min={1} max={9 - dPax.children} onChange={(v) => setDPax((p) => ({ ...p, adults: v, infants: Math.min(p.infants, v) }))} />
+          <Counter label="Children" hint="2 – 11 years" value={dPax.children} min={0} max={9 - dPax.adults} onChange={(v) => setDPax((p) => ({ ...p, children: v }))} />
+          <Counter label="Infants" hint="Under 2 years, on an adult's lap" value={dPax.infants} min={0} max={dPax.adults} onChange={(v) => setDPax((p) => ({ ...p, infants: v }))} />
           <p className="mt-3 mb-2 text-[0.72rem] font-bold tracking-wide text-slate-500 uppercase">Travel class</p>
           <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Travel class">
             {CABINS.map(([v, l]) => (
-              <button key={v} type="button" role="radio" aria-checked={cabin === v} onClick={() => setCabin(v)}
-                className={`rounded-full border px-3.5 py-1.5 text-[0.88rem] font-semibold ${cabin === v ? 'border-navy-950 bg-navy-950 text-white' : 'border-slate-300 text-ink hover:border-slate-500'}`}>{l}</button>
+              <button key={v} type="button" role="radio" aria-checked={dCabin === v} onClick={() => setDCabin(v)}
+                className={`rounded-full border px-3.5 py-1.5 text-[0.88rem] font-semibold ${dCabin === v ? 'border-navy-950 bg-navy-950 text-white' : 'border-slate-300 text-ink hover:border-slate-500'}`}>{l}</button>
             ))}
           </div>
-          <button type="button" className="btn btn-brand mt-4 w-full" onClick={() => setOpen(false)}>Apply</button>
+          <button type="button" className="btn btn-brand mt-4 w-full" onClick={() => { setPax(dPax); setCabin(dCabin); setOpen(false) }}>Apply</button>
         </div>
       )}
     </div>
@@ -229,25 +242,24 @@ function TravellersCard({ pax, setPax, cabin, setCabin }) {
 export default function SearchWidget({ initial, onSearch, busy, submitLabel = 'Search flights', onCancel }) {
   const t = todayIso()
   const [journeyType, setJourney] = useState(initial?.journeyType || 'oneway')
-  const [segs, setSegs] = useState(initial?.segments?.length ? initial.segments : [{ from: 'BLR', to: '', date: addDays(t, 7) }])
-  const [returnDate, setReturn] = useState(initial?.returnDate || addDays(t, 12))
+  const [segs, setSegs] = useState(initial?.segments?.length ? initial.segments : [{ from: 'BLR', to: '', date: t }])
+  const [returnDate, setReturn] = useState(initial?.returnDate || '')
+  const [retSignal, setRetSignal] = useState(0)
   const [pax, setPax] = useState(initial ? { adults: initial.adults, children: initial.children, infants: initial.infants } : { adults: 1, children: 0, infants: 0 })
   const [cabin, setCabin] = useState(initial?.cabin || 'economy')
-  const [directOnly, setDirect] = useState(!!initial?.directOnly)
   const [msg, setMsg] = useState('')
   const [recent] = useState(readRecent)
 
   const setSeg = (i, k, v) => setSegs((s) => s.map((x, j) => (j === i ? { ...x, [k]: v } : x)))
   const setType = (jt) => {
     setJourney(jt)
-    if (jt === 'multicity' && segs.length < 2) setSegs((s) => [...s, { from: s[0].to, to: '', date: addDays(s[0].date, 3) }])
+    if (jt === 'multicity' && segs.length < 2) setSegs((s) => [...s, { from: s[0].to, to: '', date: '' }])
     if (jt !== 'multicity') setSegs((s) => s.slice(0, 1))
-    if (jt === 'return' && returnDate < segs[0].date) setReturn(addDays(segs[0].date, 5))
   }
   const swap = (i) => setSegs((x) => x.map((y, j) => (j === i ? { ...y, from: y.to, to: y.from } : y)))
   const setDepart = (d) => {
-    setSeg(0, 'date', d)
-    if (journeyType === 'return' && returnDate < d) setReturn(addDays(d, 5))
+    setSegs((x) => x.map((y, j) => (j === 0 ? { ...y, date: d } : y.date && y.date < d ? { ...y, date: '' } : y)))
+    if (returnDate && returnDate < d) setReturn('')
   }
   const applyRoute = (from, to) => { setSegs((s) => [{ ...s[0], from, to }, ...s.slice(1)]); if (journeyType === 'multicity') setJourney('oneway') }
 
@@ -256,9 +268,11 @@ export default function SearchWidget({ initial, onSearch, busy, submitLabel = 'S
     setMsg('')
     if (segs.some((s) => !s.from || !s.to)) return setMsg('Choose where you are flying from and to.')
     if (segs.some((s) => s.from === s.to)) return setMsg('From and To must be different.')
+    if (segs.some((s) => !s.date)) return setMsg(journeyType === 'multicity' ? 'Choose a date for every flight.' : 'Choose your departure date.')
+    if (journeyType === 'return' && !returnDate) return setMsg('Choose your return date.')
     if (pax.infants > pax.adults) return setMsg('Each infant must travel with an adult.')
     saveRecent(segs[0].from, segs[0].to)
-    onSearch({ journeyType, segments: segs, returnDate: journeyType === 'return' ? returnDate : undefined, ...pax, cabin, directOnly })
+    onSearch({ journeyType, segments: segs, returnDate: journeyType === 'return' ? returnDate : undefined, ...pax, cabin, directOnly: false })
   }
 
   const first = segs[0]
@@ -271,34 +285,32 @@ export default function SearchWidget({ initial, onSearch, busy, submitLabel = 'S
               className={`rounded-full px-4 py-1.5 text-[0.92rem] font-bold ${journeyType === v ? 'bg-navy-950 text-white' : 'bg-sand text-navy-900 hover:bg-slate-200'}`}>{l}</button>
           ))}
         </div>
-        <label className="flex items-center gap-2 text-[0.9rem] font-semibold text-slate-700"><input type="checkbox" checked={directOnly} onChange={(e) => setDirect(e.target.checked)} className="h-4.5 w-4.5" /> Non-stop only</label>
+        <TravellersCard pax={pax} setPax={setPax} cabin={cabin} setCabin={setCabin} />
       </div>
 
       {journeyType !== 'multicity' ? (
-        <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto_1fr_0.8fr_0.8fr_0.8fr] md:items-stretch">
+        <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto_1fr_0.8fr_0.8fr] md:items-stretch">
           <AirportCard id="from0" caption="From" value={first.from} onChange={(v) => setSeg(0, 'from', v)} />
           <div className="relative flex items-center justify-center md:w-0">
             <button type="button" aria-label="Swap from and to" onClick={() => swap(0)} className="z-10 grid h-10 w-10 place-items-center rounded-full border border-slate-300 bg-white text-brand-500 shadow hover:bg-sand md:-mx-5"><ArrowLeftRight size={18} /></button>
           </div>
           <AirportCard id="to0" caption="To" value={first.to} onChange={(v) => setSeg(0, 'to', v)} />
           <DateCard id="depart" caption="Departure" value={first.date} min={todayIso()} from={first.from} to={first.to} onPick={setDepart} />
-          <DateCard id="return" caption="Return" value={returnDate} min={first.date} from={first.to} to={first.from} empty={journeyType !== 'return'} onEmpty={() => setType('return')} onPick={setReturn} />
-          <TravellersCard pax={pax} setPax={setPax} cabin={cabin} setCabin={setCabin} />
+          <DateCard id="return" caption="Return" value={returnDate} min={first.date} from={first.to} to={first.from} empty={journeyType !== 'return'} onEmpty={() => { setType('return'); setRetSignal((n) => n + 1) }} openSignal={retSignal} onPick={setReturn} />
         </div>
       ) : (
         <div className="mt-4 grid gap-3">
           {segs.map((s, i) => (
-            <div key={i} className="grid gap-3 md:grid-cols-[1fr_auto_1fr_0.8fr_auto] md:items-stretch">
+            <div key={i} className="grid gap-3 md:grid-cols-[1fr_auto_1fr_0.8fr_2.75rem] md:items-stretch">
               <AirportCard id={`from${i}`} caption={`Flight ${i + 1} from`} compact value={s.from} onChange={(v) => setSeg(i, 'from', v)} />
               <button type="button" aria-label="Swap" onClick={() => swap(i)} className="hidden self-center rounded-full border border-slate-300 p-2.5 text-brand-500 md:block"><ArrowLeftRight size={16} /></button>
               <AirportCard id={`to${i}`} caption="To" compact value={s.to} onChange={(v) => setSeg(i, 'to', v)} />
-              <DateCard id={`d${i}`} caption="Date" value={s.date} min={i ? segs[i - 1].date : todayIso()} from={s.from} to={s.to} onPick={(d) => setSeg(i, 'date', d)} />
+              <DateCard id={`d${i}`} caption="Date" value={s.date} min={i ? segs[i - 1].date || todayIso() : todayIso()} from={s.from} to={s.to} onPick={(d) => setSegs((x) => x.map((y, j) => (j === i ? { ...y, date: d } : j > i && y.date && y.date < d ? { ...y, date: '' } : y)))} />
               {i > 1 ? <button type="button" aria-label="Remove flight" className="grid h-11 w-11 place-items-center self-center rounded-full text-red-600 hover:bg-red-50" onClick={() => setSegs((x) => x.filter((_, j) => j !== i))}><Trash2 size={18} /></button> : <span className="hidden w-11 md:block" />}
             </div>
           ))}
           <div className="flex flex-wrap items-center justify-between gap-3">
-            {segs.length < 5 ? <button type="button" className="inline-flex items-center gap-2 font-bold text-brand-500" onClick={() => setSegs((x) => [...x, { from: x.at(-1).to, to: '', date: addDays(x.at(-1).date, 3) }])}><Plus size={18} /> Add another flight</button> : <span />}
-            <div className="w-full md:w-64"><TravellersCard pax={pax} setPax={setPax} cabin={cabin} setCabin={setCabin} /></div>
+            {segs.length < 5 ? <button type="button" className="inline-flex items-center gap-2 font-bold text-brand-500" onClick={() => setSegs((x) => [...x, { from: x.at(-1).to, to: '', date: '' }])}><Plus size={18} /> Add another flight</button> : <span />}
           </div>
         </div>
       )}
