@@ -112,7 +112,7 @@ export function useMonthFares(from, to, ym, enabled = true) {
   return fares
 }
 
-function Calendar({ value, min, onPick, from, to }) {
+function Calendar({ value, min, onPick, from, to, range }) {
   const [ym, setYm] = useState((value || min || todayIso()).slice(0, 7))
   const fares = useMonthFares(from, to, ym)
   const [y, m] = ym.split('-').map(Number)
@@ -136,10 +136,13 @@ function Calendar({ value, min, onPick, from, to }) {
           const iso = `${ym}-${String(i + 1).padStart(2, '0')}`
           const off = iso < min
           const price = fares?.[iso]
-          const sel = iso === value
+          const [rs, re] = range || []
+          const inRange = !!(rs && re && iso >= rs && iso <= re)
+          const sel = iso === value || (inRange && (iso === rs || iso === re))
+          const ends = inRange ? `${iso === rs ? 'rounded-l-lg' : ''} ${iso === re ? 'rounded-r-lg' : ''}` : 'rounded-lg'
           return (
             <button key={iso} type="button" disabled={off} onClick={() => onPick(iso)} aria-label={`${dayMonth(iso)}${price ? `, from ${inr(price)}` : ''}`} aria-pressed={sel}
-              className={`mx-auto flex h-12 w-11 flex-col items-center justify-center rounded-lg text-[0.92rem] ${sel ? 'bg-navy-950 font-bold text-white' : off ? 'text-slate-300' : 'text-ink hover:bg-sand'}`}>
+              className={`mx-auto flex h-12 ${inRange ? 'w-full' : 'w-11'} flex-col items-center justify-center ${ends} text-[0.92rem] ${sel ? 'bg-navy-950 font-bold text-white' : inRange ? 'bg-brand-500/15 font-semibold text-ink' : off ? 'text-slate-300' : 'text-ink hover:bg-sand'}`}>
               <span>{i + 1}</span>
               {price ? <span className={`text-[0.6rem] leading-none font-semibold ${sel ? 'text-gold-400' : price === cheapest ? 'text-palm' : 'text-slate-500'}`}>{inr(price).replace('₹', '')}</span> : <span className="h-[0.6rem]" />}
             </button>
@@ -151,7 +154,7 @@ function Calendar({ value, min, onPick, from, to }) {
   )
 }
 
-function DateCard({ caption, value, min, onPick, from, to, empty, onEmpty, id, placeholder = 'Select date', openSignal = 0 }) {
+function DateCard({ caption, value, min, onPick, from, to, empty, onEmpty, id, placeholder = 'Select date', openSignal = 0, range }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
   useOutside(ref, () => setOpen(false))
@@ -181,7 +184,7 @@ function DateCard({ caption, value, min, onPick, from, to, empty, onEmpty, id, p
       </FieldCard>
       {open && (
         <div className="absolute right-0 z-30 mt-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl md:left-0 md:right-auto">
-          <Calendar value={value} min={min} from={from} to={to} onPick={(d) => { onPick(d); setOpen(false) }} />
+          <Calendar value={value} min={min} from={from} to={to} range={range} onPick={(d) => { onPick(d); setOpen(false) }} />
         </div>
       )}
     </div>
@@ -213,10 +216,10 @@ function TravellersCard({ pax, setPax, cabin, setCabin }) {
   const n = pax.adults + pax.children + pax.infants
   return (
     <div className="relative" ref={ref}>
-      <button type="button" id="travellers" onClick={toggle} aria-expanded={open} aria-label={`Travellers: ${n}`}
+      <button type="button" id="travellers" onClick={toggle} aria-expanded={open} aria-label={`Travellers: ${n}, ${cabin}`}
         className={`flex flex-col rounded-xl border bg-white px-3.5 py-1.5 text-left transition hover:border-brand-500 ${open ? 'border-brand-500 ring-2 ring-brand-500/20' : 'border-slate-300'}`}>
         <span className="text-[0.68rem] font-bold tracking-wide text-slate-500 uppercase">Travellers</span>
-        <span className="flex items-center gap-1.5 font-display text-[1.15rem] leading-tight font-bold text-ink"><Users size={17} className="text-slate-500" /> {n}</span>
+        <span className="flex items-center gap-1.5 font-display text-[1.15rem] leading-tight font-bold text-ink"><Users size={17} className="text-slate-500" /> {n}<span className="font-body text-[0.78rem] font-semibold text-slate-500">· {CABINS.find(([v]) => v === cabin)?.[1].replace('Premium economy', 'Prem. economy')}</span></span>
       </button>
       {open && (
         <div className="absolute right-0 z-30 mt-2 w-[min(22rem,92vw)] rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl">
@@ -295,8 +298,8 @@ export default function SearchWidget({ initial, onSearch, busy, submitLabel = 'S
             <button type="button" aria-label="Swap from and to" onClick={() => swap(0)} className="z-10 grid h-10 w-10 place-items-center rounded-full border border-slate-300 bg-white text-brand-500 shadow hover:bg-sand md:-mx-5"><ArrowLeftRight size={18} /></button>
           </div>
           <AirportCard id="to0" caption="To" value={first.to} onChange={(v) => setSeg(0, 'to', v)} />
-          <DateCard id="depart" caption="Departure" value={first.date} min={todayIso()} from={first.from} to={first.to} onPick={setDepart} />
-          <DateCard id="return" caption="Return" value={returnDate} min={first.date} from={first.to} to={first.from} empty={journeyType !== 'return'} onEmpty={() => { setType('return'); setRetSignal((n) => n + 1) }} openSignal={retSignal} onPick={setReturn} />
+          <DateCard id="depart" caption="Departure" range={journeyType === 'return' && returnDate ? [first.date, returnDate] : undefined} value={first.date} min={todayIso()} from={first.from} to={first.to} onPick={setDepart} />
+          <DateCard id="return" caption="Return" range={returnDate ? [first.date, returnDate] : undefined} value={returnDate} min={first.date} from={first.to} to={first.from} empty={journeyType !== 'return'} onEmpty={() => { setType('return'); setRetSignal((n) => n + 1) }} openSignal={retSignal} onPick={setReturn} />
         </div>
       ) : (
         <div className="mt-4 grid gap-3">
