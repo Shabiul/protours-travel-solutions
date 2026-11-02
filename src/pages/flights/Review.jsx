@@ -12,6 +12,9 @@ import { AirlineMark, FEE_TYPE, PenaltyBar, cityOf, dateLabel, dur, inr, longDat
 const TYPE_NAME = { 1: 'Adult', 2: 'Child', 3: 'Infant' }
 const TITLES = { 1: ['Mr', 'Mrs', 'Ms'], 2: ['Mstr', 'Miss'], 3: ['Mstr', 'Miss'] }
 const HOLD_MS = 15 * 60 * 1000
+// The server refuses to start a payment with under 4 minutes of the airline's 15-minute hold left (paying and ticketing take time),
+// so the page stops offering to pay at the same moment instead of letting the customer click and fail.
+const SAFE_MS = 4 * 60 * 1000 + 15_000
 
 const findSsr = (leg, key) => [...(leg.ssr?.baggage || []), ...(leg.ssr?.meals || [])].find((x) => x.key === key)
 
@@ -227,7 +230,7 @@ function FareSummary({ q, extras, left, expired, agree, setAgree, busy, form }) 
     <aside className={`${ui.card} h-fit p-5 lg:sticky lg:top-24`}>
       <h2 className="font-display text-[1.15rem] font-bold text-ink">Fare summary</h2>
       <p className={`mt-2 flex items-center gap-2 rounded-lg px-3 py-2 text-[0.85rem] font-semibold ${expired ? 'bg-red-50 text-red-700' : left < 180000 ? 'bg-gold-500/15 text-gold-600' : 'bg-palm/10 text-palm'}`}>
-        <Clock size={15} /> {expired ? 'This fare has timed out. Please search again.' : <>Fare held for <span className="font-mono">{mmss(left)}</span></>}
+        <Clock size={15} /> {expired ? (left > 0 ? 'Too little time is left to pay safely. Please go back and search again.' : 'This fare has timed out. Please search again.') : <>Fare held for <span className="font-mono">{mmss(left)}</span></>}
       </p>
       <FareLines q={q} />
       {extras > 0 && <p className="mt-3 flex justify-between text-[0.92rem]"><span>Meals &amp; baggage</span><span className="font-semibold">{inr(extras)}</span></p>}
@@ -271,7 +274,7 @@ export default function Review({ q, searchedAt, onBack, onPay, busy }) {
   const addOnsAvailable = q.legs.some((leg) => leg.ssr?.available && leg.ssr.isLCC && ['meals', 'baggage'].some((k) => (leg.ssr[k] || []).some((x) => x.price > 0 || !/^No/.test(x.code))))
   const expiresAt = searchedAt + HOLD_MS
   const left = useCountdown(expiresAt)
-  const expired = left <= 0
+  const expired = left <= SAFE_MS
 
   const setP = (i, k, v) => setPax((p) => p.map((x, j) => (j === i ? { ...x, [k]: v } : x)))
   const setG = (i, k, v) => setPax((p) => p.map((x, j) => (j === i ? { ...x, guardian: { ...x.guardian, [k]: v } } : x)))
@@ -350,7 +353,7 @@ export default function Review({ q, searchedAt, onBack, onPay, busy }) {
           )}
           <div className="grid gap-3 sm:grid-cols-2">
             <div><label className={label} htmlFor="em">Email</label><input id="em" type="email" className={input} required autoComplete="email" value={contact.email} onChange={(e) => setContact((c) => ({ ...c, email: e.target.value }))} /></div>
-            <div><label className={label} htmlFor="ph">Mobile number</label><input id="ph" type="tel" className={input} required inputMode="numeric" autoComplete="tel" pattern="\+?[0-9 ()-]{10,18}" value={contact.phone} onChange={(e) => setContact((c) => ({ ...c, phone: e.target.value }))} /></div>
+            <div><label className={label} htmlFor="ph">Mobile number</label><input id="ph" type="tel" className={input} required inputMode="numeric" autoComplete="tel" pattern="\+?[0-9 \(\)\-]{10,18}" value={contact.phone} onChange={(e) => setContact((c) => ({ ...c, phone: e.target.value }))} /></div>
             <div><label className={label} htmlFor="ad">Address</label><input id="ad" className={input} required autoComplete="street-address" value={contact.address} onChange={(e) => setContact((c) => ({ ...c, address: e.target.value }))} /></div>
             <div><label className={label} htmlFor="ci">City</label><input id="ci" className={input} required autoComplete="address-level2" value={contact.city} onChange={(e) => setContact((c) => ({ ...c, city: e.target.value }))} /></div>
           </div>

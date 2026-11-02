@@ -113,6 +113,8 @@ export default function BookFlights() {
   const [step, setStep] = useState('search')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  // an error banner sits at the top of the page: bring it into view, or a failed "Pay now" at the bottom looks like nothing happened
+  useEffect(() => { if (error) window.scrollTo({ top: 0, behavior: 'smooth' }) }, [error])
   const [form, setForm] = useState(null)
   const [pending, setPending] = useState(null) // the search being run, for the loading screen
   const [found, setFound] = useState(null)
