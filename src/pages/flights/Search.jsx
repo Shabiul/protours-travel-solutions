@@ -112,7 +112,8 @@ export function useMonthFares(from, to, ym, enabled = true) {
   return fares
 }
 
-function Calendar({ value, min, onPick, from, to, range }) {
+function Calendar({ value, min, onPick, from, to, range, anchor }) {
+  const [hover, setHover] = useState('')
   const [ym, setYm] = useState((value || min || todayIso()).slice(0, 7))
   const fares = useMonthFares(from, to, ym)
   const [y, m] = ym.split('-').map(Number)
@@ -130,18 +131,18 @@ function Calendar({ value, min, onPick, from, to, range }) {
         <button type="button" aria-label="Next month" className="grid h-9 w-9 place-items-center rounded-full hover:bg-sand" onClick={() => shift(1)}><ChevronRight size={18} /></button>
       </div>
       <div className="grid grid-cols-7 text-center text-[0.7rem] font-bold text-slate-500">{['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => <span key={i} className="py-1">{d}</span>)}</div>
-      <div className="grid grid-cols-7 gap-y-1">
+      <div className="grid grid-cols-7 gap-y-1" onMouseLeave={() => setHover('')}>
         {Array.from({ length: lead }).map((_, i) => <span key={`b${i}`} />)}
         {Array.from({ length: days }).map((_, i) => {
           const iso = `${ym}-${String(i + 1).padStart(2, '0')}`
           const off = iso < min
           const price = fares?.[iso]
-          const [rs, re] = range || []
+          const [rs, re] = anchor && hover && hover >= anchor ? [anchor, hover] : range || (anchor ? [anchor, anchor] : [])
           const inRange = !!(rs && re && iso >= rs && iso <= re)
-          const sel = iso === value || (inRange && (iso === rs || iso === re))
+          const sel = (!anchor && iso === value) || (inRange && (iso === rs || iso === re))
           const ends = inRange ? `${iso === rs ? 'rounded-l-lg' : ''} ${iso === re ? 'rounded-r-lg' : ''}` : 'rounded-lg'
           return (
-            <button key={iso} type="button" disabled={off} onClick={() => onPick(iso)} aria-label={`${dayMonth(iso)}${price ? `, from ${inr(price)}` : ''}`} aria-pressed={sel}
+            <button key={iso} type="button" disabled={off} onMouseEnter={() => setHover(off ? '' : iso)} onClick={() => onPick(iso)} aria-label={`${dayMonth(iso)}${price ? `, from ${inr(price)}` : ''}`} aria-pressed={sel}
               className={`mx-auto flex h-12 ${inRange ? 'w-full' : 'w-11'} flex-col items-center justify-center ${ends} text-[0.92rem] ${sel ? 'bg-navy-950 font-bold text-white' : inRange ? 'bg-brand-500/15 font-semibold text-ink' : off ? 'text-slate-300' : 'text-ink hover:bg-sand'}`}>
               <span>{i + 1}</span>
               {price ? <span className={`text-[0.6rem] leading-none font-semibold ${sel ? 'text-gold-400' : price === cheapest ? 'text-palm' : 'text-slate-500'}`}>{inr(price).replace('₹', '')}</span> : <span className="h-[0.6rem]" />}
@@ -154,7 +155,7 @@ function Calendar({ value, min, onPick, from, to, range }) {
   )
 }
 
-function DateCard({ caption, value, min, onPick, from, to, empty, onEmpty, id, placeholder = 'Select date', openSignal = 0, range }) {
+function DateCard({ caption, value, min, onPick, from, to, empty, onEmpty, id, placeholder = 'Select date', openSignal = 0, range, anchor }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
   useOutside(ref, () => setOpen(false))
@@ -184,7 +185,7 @@ function DateCard({ caption, value, min, onPick, from, to, empty, onEmpty, id, p
       </FieldCard>
       {open && (
         <div className="absolute right-0 z-30 mt-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl md:left-0 md:right-auto">
-          <Calendar value={value} min={min} from={from} to={to} range={range} onPick={(d) => { onPick(d); setOpen(false) }} />
+          <Calendar value={value} min={min} from={from} to={to} range={range} anchor={anchor} onPick={(d) => { onPick(d); setOpen(false) }} />
         </div>
       )}
     </div>
@@ -299,7 +300,7 @@ export default function SearchWidget({ initial, onSearch, busy, submitLabel = 'S
           </div>
           <AirportCard id="to0" caption="To" value={first.to} onChange={(v) => setSeg(0, 'to', v)} />
           <DateCard id="depart" caption="Departure" range={journeyType === 'return' && returnDate ? [first.date, returnDate] : undefined} value={first.date} min={todayIso()} from={first.from} to={first.to} onPick={setDepart} />
-          <DateCard id="return" caption="Return" range={returnDate ? [first.date, returnDate] : undefined} value={returnDate} min={first.date} from={first.to} to={first.from} empty={journeyType !== 'return'} onEmpty={() => { setType('return'); setRetSignal((n) => n + 1) }} openSignal={retSignal} onPick={setReturn} />
+          <DateCard id="return" caption="Return" anchor={first.date} range={returnDate ? [first.date, returnDate] : undefined} value={returnDate} min={first.date} from={first.to} to={first.from} empty={journeyType !== 'return'} onEmpty={() => { setType('return'); setRetSignal((n) => n + 1) }} openSignal={retSignal} onPick={setReturn} />
         </div>
       ) : (
         <div className="mt-4 grid gap-3">
